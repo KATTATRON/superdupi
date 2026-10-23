@@ -1,4 +1,4 @@
-package com.example;
+package com.example.client;
 
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.*;
@@ -33,10 +33,11 @@ public class ExampleModClient implements ClientModInitializer {
 
     @Override
     public void onInitializeClient() {
+        // F4 Keybind mit Category-Objekt statt String
         clickGuiKey = KeyBindingHelper.registerKeyBinding(new KeyMapping(
             "key.example.clickgui",
             GLFW.GLFW_KEY_F4,
-            "category.example.client"
+            KeyMapping.CATEGORY_MISC
         ));
 
         // ClickGUI mit F4 öffnen
@@ -46,7 +47,7 @@ public class ExampleModClient implements ClientModInitializer {
             }
         });
 
-        // Alternativer Chat-Befehl: /clickgui
+        // Chat-Befehl: /clickgui
         net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
             dispatcher.register(net.fabricmc.fabric.api.client.command.v2.ClientCommandManager.literal("clickgui")
                 .executes(c -> {
@@ -55,7 +56,7 @@ public class ExampleModClient implements ClientModInitializer {
                 }));
         });
 
-        // ESP Rendering durch Wände
+        // ESP Rendering
         WorldRenderEvents.LAST.register(context -> {
             for (Module mod : MODULES) {
                 if (mod.isEnabled()) {
@@ -226,7 +227,6 @@ public class ExampleModClient implements ClientModInitializer {
             RenderSystem.defaultBlendFunc();
             RenderSystem.disableDepthTest();
             RenderSystem.disableCull();
-            RenderSystem.setShader(GameRenderer::getPositionColorShader);
 
             if (mode.equals("Fill") || mode.equals("Both")) {
                 drawFilledBox(matrix, shifted, r, g, b, fillAlpha);
@@ -276,7 +276,10 @@ public class ExampleModClient implements ClientModInitializer {
             buffer.addVertex(matrix, maxX, maxY, maxZ).setColor(red, green, blue, alpha);
             buffer.addVertex(matrix, maxX, minY, maxZ).setColor(red, green, blue, alpha);
 
-            BufferUploader.drawWithShader(buffer.buildOrThrow());
+            MeshData mesh = buffer.build();
+            if (mesh != null) {
+                BufferUploader.drawWithShader(mesh);
+            }
         }
 
         private static void drawBoxOutline(Matrix4f matrix, AABB b, float red, float green, float blue, float alpha) {
@@ -299,7 +302,10 @@ public class ExampleModClient implements ClientModInitializer {
             line(buffer, matrix, maxX, minY, maxZ, maxX, maxY, maxZ, red, green, blue, alpha);
             line(buffer, matrix, minX, minY, maxZ, minX, maxY, maxZ, red, green, blue, alpha);
 
-            BufferUploader.drawWithShader(buffer.buildOrThrow());
+            MeshData mesh = buffer.build();
+            if (mesh != null) {
+                BufferUploader.drawWithShader(mesh);
+            }
         }
 
         private static void line(BufferBuilder buf, Matrix4f mat, float x1, float y1, float z1, float x2, float y2, float z2, float r, float g, float b, float a) {
