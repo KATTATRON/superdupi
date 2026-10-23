@@ -27,7 +27,8 @@ import java.util.List;
 public class ExampleModClient implements ClientModInitializer {
     public static final List<Module> MODULES = List.of(
         new StorageFinder(),
-        new SpawnerFinder()
+        new SpawnerFinder(),
+        new Freecam()
     );
 
     private boolean f4WasDown = false;
@@ -35,7 +36,7 @@ public class ExampleModClient implements ClientModInitializer {
 
     @Override
     public void onInitializeClient() {
-        // F4 Keybind + Background Block Scanner
+        // F4 Keybind + Block-Scanner + Freecam Bewegung
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             if (client.getWindow() == null) return;
             boolean f4Down = InputConstants.isKeyDown(client.getWindow(), GLFW.GLFW_KEY_F4);
@@ -45,6 +46,7 @@ public class ExampleModClient implements ClientModInitializer {
             }
             f4WasDown = f4Down;
 
+            // Block-Entities scannen, wenn Module aktiv sind
             if (client.level != null && client.player != null) {
                 scanTimer++;
                 if (scanTimer >= 10) {
@@ -56,9 +58,40 @@ public class ExampleModClient implements ClientModInitializer {
                     }
                 }
             }
+
+            // Freecam Bewegungslogik
+            Freecam freecamMod = null;
+            for (Module m : MODULES) {
+                if (m instanceof Freecam f) {
+                    freecamMod = f;
+                    break;
+                }
+            }
+
+            if (freecamMod != null && freecamMod.isEnabled() && client.player != null) {
+                client.player.setDeltaMovement(0, 0, 0);
+                double spd = freecamMod.speed.getValue();
+                double rad = Math.toRadians(client.player.getYRot());
+                double forward = 0, strafe = 0;
+
+                if (client.options.upKey.isDown()) forward += 1;
+                if (client.options.downKey.isDown()) forward -= 1;
+                if (client.options.leftKey.isDown()) strafe += 1;
+                if (client.options.rightKey.isDown()) strafe -= 1;
+
+                if (forward != 0 || strafe != 0) {
+                    double cos = Math.cos(rad);
+                    double sin = Math.sin(rad);
+                    Freecam.camX += (forward * cos - strafe * sin) * spd;
+                    Freecam.camZ += (forward * sin + strafe * cos) * spd;
+                }
+
+                if (client.options.jumpKey.isDown()) Freecam.camY += spd;
+                if (client.options.shiftKey.isDown()) Freecam.camY -= spd;
+            }
         });
 
-        // Locked-In 3D Camera ESP on HUD
+        // Dauerhaftes 3D-ESP auf dem HUD
         HudRenderCallback.EVENT.register((context, tickCounter) -> {
             Minecraft mc = Minecraft.getInstance();
             if (mc.level == null || mc.player == null || mc.options.hideGui) return;
@@ -75,7 +108,7 @@ public class ExampleModClient implements ClientModInitializer {
             }
         });
 
-        // Backup Chat Command: /clickgui
+        // Chat-Befehl: /clickgui
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
             dispatcher.register(ClientCommandManager.literal("clickgui")
                 .executes(c -> {
@@ -179,7 +212,7 @@ public class ExampleModClient implements ClientModInitializer {
             }
             if (mc.player != null) {
                 mc.player.displayClientMessage(
-                    Component.literal("§d[ESP] §f" + name + ": " + (enabled ? "§aON" : "§cOFF")),
+                    Component.literal("§d[Client] §f" + name + ": " + (enabled ? "§aON" : "§cOFF")),
                     true
                 );
             }
@@ -247,6 +280,50 @@ public class ExampleModClient implements ClientModInitializer {
         }
     }
 
+    public static class Freecam extends Module {
+        public final NumberSetting speed = new NumberSetting("Speed", 1.0, 0.1, 5.0, 0.1);
+
+        private double savedX, savedY, savedZ;
+        private float savedYaw, savedPitch;
+
+        public static double camX, camY, camZ;
+        public static boolean isFreecamActive = false;
+
+        public Freecam() {
+            super("Freecam", 50, 200, 255);
+            settings.addAll(List.of(speed));
+        }
+
+        @Override
+        public void toggle() {
+            super.toggle();
+            Minecraft mc = Minecraft.getInstance();
+            if (mc.player == null) return;
+
+            isFreecamActive = isEnabled();
+            if (isFreecamActive) {
+                savedX = mc.player.getX();
+                savedY = mc.player.getY();
+                savedZ = mc.player.getZ();
+                savedYaw = mc.player.getYRot();
+                savedPitch = mc.player.getXRot();
+
+                camX = savedX;
+                camY = savedY + mc.player.getEyeHeight();
+                camZ = savedZ;
+            } else {
+                mc.player.setPos(savedX, savedY, savedZ);
+                mc.player.setYRot(savedYaw);
+                mc.player.setXRot(savedPitch);
+            }
+        }
+
+        @Override
+        public void onTick(Minecraft mc) {
+            // Keine Blocksuche nötig
+        }
+    }
+
     public static List<BlockEntity> getLoadedBlockEntities(Minecraft mc) {
         List<BlockEntity> list = new ArrayList<>();
         if (mc.level == null || mc.player == null) return list;
@@ -265,13 +342,13 @@ public class ExampleModClient implements ClientModInitializer {
     }
 
     // ==========================================
-    // EXACT CAMERA-LOCKED 3D PROJECTION ENGINE
+    // 3D PROJECTION ENGINE
     // ==========================================
     public static class EspRenderer {
         private static final int[][] EDGES = {
-            {0,1}, {1,3}, {3,2}, {2,0}, // Bottom
-            {4,5}, {5,7}, {7,6}, {6,4}, // Top
-            {0,4}, {1,5}, {2,6}, {3,7}  // Pillars
+            {0,1}, {1,3}, {3,2}, {2,0},
+            {4,5}, {5,7}, {7,6}, {6,4},
+            {0,4}, {1,5}, {2,6}, {3,7}
         };
 
         private static Method camPosMethod;
@@ -282,7 +359,6 @@ public class ExampleModClient implements ClientModInitializer {
         private static void initReflection(Camera cam, Object gameRenderer) {
             if (reflectionInitialized) return;
             reflectionInitialized = true;
-            // Find Camera Vec3 position method (getPosition vs position)
             for (Method m : cam.getClass().getDeclaredMethods()) {
                 if (m.getParameterCount() == 0 && m.getReturnType() == Vec3.class) {
                     m.setAccessible(true);
@@ -290,7 +366,6 @@ public class ExampleModClient implements ClientModInitializer {
                     break;
                 }
             }
-            // Find Camera Quaternionf rotation method
             for (Method m : cam.getClass().getDeclaredMethods()) {
                 if (m.getParameterCount() == 0 && m.getReturnType() == Quaternionf.class) {
                     m.setAccessible(true);
@@ -298,7 +373,6 @@ public class ExampleModClient implements ClientModInitializer {
                     break;
                 }
             }
-            // Find GameRenderer.getFov(Camera, float, boolean)
             for (Method m : gameRenderer.getClass().getDeclaredMethods()) {
                 Class<?>[] params = m.getParameterTypes();
                 if (params.length == 3 && params[0] == Camera.class && params[1] == float.class && params[2] == boolean.class) {
@@ -315,13 +389,16 @@ public class ExampleModClient implements ClientModInitializer {
             Camera cam = mc.gameRenderer.getMainCamera();
             initReflection(cam, mc.gameRenderer);
 
-            // 1. Get exact Camera Position (includes view bobbing & third-person)
-            Vec3 camPos = mc.player.getEyePosition(partialTick);
-            if (camPosMethod != null) {
-                try { camPos = (Vec3) camPosMethod.invoke(cam); } catch (Exception ignored) {}
+            Vec3 camPos;
+            if (Freecam.isFreecamActive) {
+                camPos = new Vec3(Freecam.camX, Freecam.camY, Freecam.camZ);
+            } else {
+                camPos = mc.player.getEyePosition(partialTick);
+                if (camPosMethod != null) {
+                    try { camPos = (Vec3) camPosMethod.invoke(cam); } catch (Exception ignored) {}
+                }
             }
 
-            // 2. Get exact Camera Rotation Quaternion (includes view bobbing roll/pitch/yaw)
             Quaternionf invCamRot = null;
             if (camRotMethod != null) {
                 try {
@@ -330,7 +407,6 @@ public class ExampleModClient implements ClientModInitializer {
                 } catch (Exception ignored) {}
             }
 
-            // 3. Get exact vertical FOV from GameRenderer
             double fov = mc.options.fov().get() * mc.player.getFieldOfViewModifier(true, partialTick);
             if (getFovMethod != null) {
                 try {
@@ -380,9 +456,7 @@ public class ExampleModClient implements ClientModInitializer {
 
                     float rx, ry, finalZ;
                     if (invCamRot != null) {
-                        // Transform world offset directly by the camera's exact 3D quaternion
                         Vector3f v = new Vector3f(wx, wy, wz).rotate(invCamRot);
-                        // In Minecraft's camera quaternion space, -Z is forward, -X is right (or +X), +Y is up
                         rx = v.x;
                         ry = v.y;
                         finalZ = v.z;
@@ -407,12 +481,10 @@ public class ExampleModClient implements ClientModInitializer {
 
                 if (!allVisible) continue;
 
-                // 1. True 3D Wireframe Fill (interpolated 3D face grid instead of ugly 2D square)
                 if (renderMode.equals("Fill") || renderMode.equals("Both")) {
                     draw3DFaceFill(context, sx, sy, fillColor, sw, sh);
                 }
 
-                // 2. Crisp 3D Wireframe Edges
                 if (renderMode.equals("Outline") || renderMode.equals("Both")) {
                     for (int[] edge : EDGES) {
                         drawCrispLine(context, Math.round(sx[edge[0]]), Math.round(sy[edge[0]]),
@@ -420,7 +492,6 @@ public class ExampleModClient implements ClientModInitializer {
                     }
                 }
 
-                // 3. Tracer Line
                 if (mod.tracers.getValue()) {
                     int cx = Math.round((sx[0] + sx[7]) * 0.5f);
                     int cy = Math.round((sy[0] + sy[7]) * 0.5f);
@@ -429,15 +500,14 @@ public class ExampleModClient implements ClientModInitializer {
             }
         }
 
-        // Fills the actual 3D faces of the cube so there is no flat 2D square sticking out
         private static void draw3DFaceFill(GuiGraphics context, float[] sx, float[] sy, int color, int sw, int sh) {
             int[][] faces = {
-                {0, 1, 3, 2}, // Bottom
-                {4, 5, 7, 6}, // Top
-                {0, 1, 5, 4}, // North
-                {2, 3, 7, 6}, // South
-                {0, 2, 6, 4}, // West
-                {1, 3, 7, 5}  // East
+                {0, 1, 3, 2},
+                {4, 5, 7, 6},
+                {0, 1, 5, 4},
+                {2, 3, 7, 6},
+                {0, 2, 6, 4},
+                {1, 3, 7, 5}
             };
             int steps = 6;
             for (int[] face : faces) {
@@ -496,7 +566,7 @@ public class ExampleModClient implements ClientModInitializer {
 
         @Override
         public void renderBackground(GuiGraphics context, int mouseX, int mouseY, float delta) {
-            // No blur
+            // Kein Blur-Hintergrund
         }
 
         @Override
@@ -539,7 +609,7 @@ public class ExampleModClient implements ClientModInitializer {
                     context.fill(panelX, currentY, panelX + 3, currentY + 18, 0xFF8A2BE2);
                 }
 
-                String label = mod.getName() + (mod.isEnabled() ? " [" + mod.targets.size() + "]" : "");
+                String label = mod.getName() + (mod.isEnabled() && !mod.targets.isEmpty() ? " [" + mod.targets.size() + "]" : "");
                 context.drawString(this.font, label, panelX + 8, currentY + 5, mod.isEnabled() ? 0xFFD8B4FE : 0xFFAAAAAA, true);
                 context.drawString(this.font, mod.isExpanded() ? "▾" : "▸", panelX + panelWidth - 12, currentY + 5, 0xFF888888, true);
                 currentY += 18;
