@@ -6,6 +6,7 @@ import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
+import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.Screen;
@@ -15,8 +16,11 @@ import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.entity.*;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.phys.Vec3;
+import org.joml.Quaternionf;
+import org.joml.Vector3f;
 import org.lwjgl.glfw.GLFW;
 
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -54,7 +58,7 @@ public class ExampleModClient implements ClientModInitializer {
             }
         });
 
-        // High-Precision Native-Resolution 3D ESP on HUD
+        // Locked-In 3D Camera ESP on HUD
         HudRenderCallback.EVENT.register((context, tickCounter) -> {
             Minecraft mc = Minecraft.getInstance();
             if (mc.level == null || mc.player == null || mc.options.hideGui) return;
@@ -83,12 +87,12 @@ public class ExampleModClient implements ClientModInitializer {
     }
 
     // ==========================================
-    // TARGET DATA HOLDER (With exact hitbox bounds)
+    // TARGET DATA HOLDER
     // ==========================================
     public static class RenderTarget {
         public final BlockPos pos;
         public final float minX, minY, minZ, maxX, maxY, maxZ;
-        public final int customColor; // -1 = use module sliders
+        public final int customColor;
 
         public RenderTarget(BlockPos pos, float minX, float minY, float minZ, float maxX, float maxY, float maxZ, int customColor) {
             this.pos = pos;
@@ -157,7 +161,7 @@ public class ExampleModClient implements ClientModInitializer {
         public final NumberSetting green;
         public final NumberSetting blue;
         public final NumberSetting outlineAlpha = new NumberSetting("Outline Opacity", 255, 0, 255, 1);
-        public final NumberSetting fillAlpha = new NumberSetting("Fill Opacity", 55, 0, 255, 1);
+        public final NumberSetting fillAlpha = new NumberSetting("Fill Opacity", 65, 0, 255, 1);
         public final BooleanSetting tracers = new BooleanSetting("Tracers", false);
 
         public Module(String name, double r, double g, double b) {
@@ -210,16 +214,13 @@ public class ExampleModClient implements ClientModInitializer {
                 BlockPos p = be.getBlockPos();
 
                 if (chests.getValue() && be instanceof ChestBlockEntity) {
-                    // Exact Chest hitbox (0.0625 to 0.9375, height 0.875)
                     targets.add(new RenderTarget(p, 0.0625f, 0.0f, 0.0625f, 0.9375f, 0.875f, 0.9375f, -1));
                 } else if (chests.getValue() && be instanceof BarrelBlockEntity) {
                     targets.add(new RenderTarget(p, 0f, 0f, 0f, 1f, 1f, 1f, -1));
                 } else if (enderChests.getValue() && be instanceof EnderChestBlockEntity) {
-                    // Exact EnderChest hitbox + distinct Neon Purple highlight (0xAA00FF)
                     targets.add(new RenderTarget(p, 0.0625f, 0.0f, 0.0625f, 0.9375f, 0.875f, 0.9375f, 0xAA00FF));
                 } else if (hoppers.getValue() && be instanceof HopperBlockEntity) {
-                    // Hopper bounds + clean Silver/Cyan tint (0x70D6FF)
-                    targets.add(new RenderTarget(p, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 0x70D6FF));
+                    targets.add(new RenderTarget(p, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 0x55FFFF));
                 } else if (shulkers.getValue() && be instanceof ShulkerBoxBlockEntity) {
                     targets.add(new RenderTarget(p, 0f, 0f, 0f, 1f, 1f, 1f, 0xFF55FF));
                 } else if (droppers.getValue() && (be instanceof DropperBlockEntity || be instanceof DispenserBlockEntity)) {
@@ -264,31 +265,85 @@ public class ExampleModClient implements ClientModInitializer {
     }
 
     // ==========================================
-    // HIGH-PRECISION 3D PROJECTION ENGINE
+    // EXACT CAMERA-LOCKED 3D PROJECTION ENGINE
     // ==========================================
     public static class EspRenderer {
         private static final int[][] EDGES = {
-            {0,1}, {1,3}, {3,2}, {2,0}, // Bottom face
-            {4,5}, {5,7}, {7,6}, {6,4}, // Top face
-            {0,4}, {1,5}, {2,6}, {3,7}  // Vertical pillars
+            {0,1}, {1,3}, {3,2}, {2,0}, // Bottom
+            {4,5}, {5,7}, {7,6}, {6,4}, // Top
+            {0,4}, {1,5}, {2,6}, {3,7}  // Pillars
         };
 
+        private static Method camPosMethod;
+        private static Method camRotMethod;
+        private static Method getFovMethod;
+        private static boolean reflectionInitialized = false;
+
+        private static void initReflection(Camera cam, Object gameRenderer) {
+            if (reflectionInitialized) return;
+            reflectionInitialized = true;
+            // Find Camera Vec3 position method (getPosition vs position)
+            for (Method m : cam.getClass().getDeclaredMethods()) {
+                if (m.getParameterCount() == 0 && m.getReturnType() == Vec3.class) {
+                    m.setAccessible(true);
+                    camPosMethod = m;
+                    break;
+                }
+            }
+            // Find Camera Quaternionf rotation method
+            for (Method m : cam.getClass().getDeclaredMethods()) {
+                if (m.getParameterCount() == 0 && m.getReturnType() == Quaternionf.class) {
+                    m.setAccessible(true);
+                    camRotMethod = m;
+                    break;
+                }
+            }
+            // Find GameRenderer.getFov(Camera, float, boolean)
+            for (Method m : gameRenderer.getClass().getDeclaredMethods()) {
+                Class<?>[] params = m.getParameterTypes();
+                if (params.length == 3 && params[0] == Camera.class && params[1] == float.class && params[2] == boolean.class) {
+                    m.setAccessible(true);
+                    getFovMethod = m;
+                    break;
+                }
+            }
+        }
+
         public static void renderModuleEsp(GuiGraphics context, Minecraft mc, Module mod, int sw, int sh, float partialTick) {
-            if (mc.player == null) return;
+            if (mc.player == null || mc.gameRenderer == null) return;
 
-            // Smooth interpolated eye position & rotation (eliminates lag/offset when moving)
+            Camera cam = mc.gameRenderer.getMainCamera();
+            initReflection(cam, mc.gameRenderer);
+
+            // 1. Get exact Camera Position (includes view bobbing & third-person)
             Vec3 camPos = mc.player.getEyePosition(partialTick);
-            float yaw = (float) Math.toRadians(mc.player.getViewYRot(partialTick));
-            float pitch = (float) Math.toRadians(mc.player.getViewXRot(partialTick));
+            if (camPosMethod != null) {
+                try { camPos = (Vec3) camPosMethod.invoke(cam); } catch (Exception ignored) {}
+            }
 
-            // Dynamic FOV calculation including sprinting/speed effects
-            double baseFov = mc.options.fov().get();
-            float fovScale = mc.player.getFieldOfViewModifier(true, partialTick);
-            double effectiveFov = baseFov * fovScale;
+            // 2. Get exact Camera Rotation Quaternion (includes view bobbing roll/pitch/yaw)
+            Quaternionf invCamRot = null;
+            if (camRotMethod != null) {
+                try {
+                    Quaternionf q = (Quaternionf) camRotMethod.invoke(cam);
+                    invCamRot = new Quaternionf(q).conjugate();
+                } catch (Exception ignored) {}
+            }
 
-            float f = (float) (1.0 / Math.tan(Math.toRadians(effectiveFov) / 2.0));
+            // 3. Get exact vertical FOV from GameRenderer
+            double fov = mc.options.fov().get() * mc.player.getFieldOfViewModifier(true, partialTick);
+            if (getFovMethod != null) {
+                try {
+                    Object res = getFovMethod.invoke(mc.gameRenderer, cam, partialTick, true);
+                    if (res instanceof Number num) fov = num.doubleValue();
+                } catch (Exception ignored) {}
+            }
+
+            float f = (float) (1.0 / Math.tan(Math.toRadians(fov) / 2.0));
             float aspect = (float) sw / (float) Math.max(1, sh);
 
+            float yaw = (float) Math.toRadians(mc.player.getViewYRot(partialTick));
+            float pitch = (float) Math.toRadians(mc.player.getViewXRot(partialTick));
             float cosYaw = (float) Math.cos(yaw + Math.PI);
             float sinYaw = (float) Math.sin(yaw + Math.PI);
             float cosPitch = (float) Math.cos(pitch);
@@ -310,27 +365,33 @@ public class ExampleModClient implements ClientModInitializer {
                 int outlineColor = ((oA & 0xFF) << 24) | ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF);
                 int fillColor = ((fA & 0xFF) << 24) | ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF);
 
-                int[] sx = new int[8];
-                int[] sy = new int[8];
+                float[] sx = new float[8];
+                float[] sy = new float[8];
                 boolean allVisible = true;
-                int minX = Integer.MAX_VALUE, minY = Integer.MAX_VALUE;
-                int maxX = Integer.MIN_VALUE, maxY = Integer.MIN_VALUE;
 
-                // Project all 8 exact hitbox corners into 3D space
                 for (int i = 0; i < 8; i++) {
                     float bx = (i & 1) != 0 ? target.maxX : target.minX;
                     float by = (i & 2) != 0 ? target.maxY : target.minY;
                     float bz = (i & 4) != 0 ? target.maxZ : target.minZ;
 
-                    float cx = (float) (pos.getX() + bx - camPos.x);
-                    float cy = (float) (pos.getY() + by - camPos.y);
-                    float cz = (float) (pos.getZ() + bz - camPos.z);
+                    float wx = (float) (pos.getX() + bx - camPos.x);
+                    float wy = (float) (pos.getY() + by - camPos.y);
+                    float wz = (float) (pos.getZ() + bz - camPos.z);
 
-                    float rx = cx * cosYaw + cz * sinYaw;
-                    float rz = -cx * sinYaw + cz * cosYaw;
-
-                    float ry = cy * cosPitch - rz * sinPitch;
-                    float finalZ = cy * sinPitch + rz * cosPitch;
+                    float rx, ry, finalZ;
+                    if (invCamRot != null) {
+                        // Transform world offset directly by the camera's exact 3D quaternion
+                        Vector3f v = new Vector3f(wx, wy, wz).rotate(invCamRot);
+                        // In Minecraft's camera quaternion space, -Z is forward, -X is right (or +X), +Y is up
+                        rx = v.x;
+                        ry = v.y;
+                        finalZ = v.z;
+                    } else {
+                        rx = wx * cosYaw + wz * sinYaw;
+                        float rz = -wx * sinYaw + wz * cosYaw;
+                        ry = wy * cosPitch - rz * sinPitch;
+                        finalZ = wy * sinPitch + rz * cosPitch;
+                    }
 
                     if (finalZ >= -0.05f) {
                         allVisible = false;
@@ -340,46 +401,57 @@ public class ExampleModClient implements ClientModInitializer {
                     float ndcX = (rx * (f / aspect)) / (-finalZ);
                     float ndcY = (ry * f) / (-finalZ);
 
-                    sx[i] = Math.round((ndcX + 1.0f) * 0.5f * sw);
-                    sy[i] = Math.round((1.0f - ndcY) * 0.5f * sh);
-
-                    minX = Math.min(minX, sx[i]);
-                    minY = Math.min(minY, sy[i]);
-                    maxX = Math.max(maxX, sx[i]);
-                    maxY = Math.max(maxY, sy[i]);
+                    sx[i] = (ndcX + 1.0f) * 0.5f * sw;
+                    sy[i] = (1.0f - ndcY) * 0.5f * sh;
                 }
 
                 if (!allVisible) continue;
-                if (maxX < 0 || maxY < 0 || minX > sw || minY > sh) continue;
 
-                // 1. Clean Inner Box Fill
+                // 1. True 3D Wireframe Fill (interpolated 3D face grid instead of ugly 2D square)
                 if (renderMode.equals("Fill") || renderMode.equals("Both")) {
-                    int fx1 = Math.max(0, minX);
-                    int fy1 = Math.max(0, minY);
-                    int fx2 = Math.min(sw, maxX);
-                    int fy2 = Math.min(sh, maxY);
-                    if (fx2 > fx1 && fy2 > fy1) {
-                        context.fill(fx1, fy1, fx2, fy2, fillColor);
-                    }
+                    draw3DFaceFill(context, sx, sy, fillColor, sw, sh);
                 }
 
                 // 2. Crisp 3D Wireframe Edges
                 if (renderMode.equals("Outline") || renderMode.equals("Both")) {
                     for (int[] edge : EDGES) {
-                        drawCrispLine(context, sx[edge[0]], sy[edge[0]], sx[edge[1]], sy[edge[1]], outlineColor, sw, sh);
+                        drawCrispLine(context, Math.round(sx[edge[0]]), Math.round(sy[edge[0]]),
+                                      Math.round(sx[edge[1]]), Math.round(sy[edge[1]]), outlineColor, sw, sh);
                     }
                 }
 
-                // 3. Optional Tracer Line
+                // 3. Tracer Line
                 if (mod.tracers.getValue()) {
-                    int centerX = (minX + maxX) / 2;
-                    int centerY = (minY + maxY) / 2;
-                    drawCrispLine(context, sw / 2, sh / 2, centerX, centerY, outlineColor, sw, sh);
+                    int cx = Math.round((sx[0] + sx[7]) * 0.5f);
+                    int cy = Math.round((sy[0] + sy[7]) * 0.5f);
+                    drawCrispLine(context, sw / 2, sh / 2, cx, cy, outlineColor, sw, sh);
                 }
             }
         }
 
-        // Optimized segment-based line drawer (draws whole horizontal/vertical spans instead of blurry dots)
+        // Fills the actual 3D faces of the cube so there is no flat 2D square sticking out
+        private static void draw3DFaceFill(GuiGraphics context, float[] sx, float[] sy, int color, int sw, int sh) {
+            int[][] faces = {
+                {0, 1, 3, 2}, // Bottom
+                {4, 5, 7, 6}, // Top
+                {0, 1, 5, 4}, // North
+                {2, 3, 7, 6}, // South
+                {0, 2, 6, 4}, // West
+                {1, 3, 7, 5}  // East
+            };
+            int steps = 6;
+            for (int[] face : faces) {
+                for (int i = 1; i < steps; i++) {
+                    float t = i / (float) steps;
+                    int x1 = Math.round(sx[face[0]] + (sx[face[3]] - sx[face[0]]) * t);
+                    int y1 = Math.round(sy[face[0]] + (sy[face[3]] - sy[face[0]]) * t);
+                    int x2 = Math.round(sx[face[1]] + (sx[face[2]] - sx[face[1]]) * t);
+                    int y2 = Math.round(sy[face[1]] + (sy[face[2]] - sy[face[1]]) * t);
+                    drawCrispLine(context, x1, y1, x2, y2, color, sw, sh);
+                }
+            }
+        }
+
         private static void drawCrispLine(GuiGraphics context, int x0, int y0, int x1, int y1, int color, int sw, int sh) {
             int dx = Math.abs(x1 - x0);
             int dy = Math.abs(y1 - y0);
@@ -424,7 +496,7 @@ public class ExampleModClient implements ClientModInitializer {
 
         @Override
         public void renderBackground(GuiGraphics context, int mouseX, int mouseY, float delta) {
-            // Keep game world crystal clear (no blur)
+            // No blur
         }
 
         @Override
