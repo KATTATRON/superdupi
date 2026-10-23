@@ -1,5 +1,6 @@
 package com.example.client;
 
+import com.mojang.blaze3d.platform.InputConstants;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
@@ -23,11 +24,10 @@ public class ExampleModClient implements ClientModInitializer {
 
     @Override
     public void onInitializeClient() {
-        // ClickGUI direkt mit F4 öffnen (ohne KeyMapping-Versionskonflikt)
+        // ClickGUI direkt mit F4 öffnen (über offizielles InputConstants)
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             if (client.getWindow() == null) return;
-            long window = client.getWindow().getWindow();
-            boolean f4Down = GLFW.glfwGetKey(window, GLFW.GLFW_KEY_F4) == GLFW.GLFW_PRESS;
+            boolean f4Down = InputConstants.isKeyDown(client.getWindow(), GLFW.GLFW_KEY_F4);
 
             if (f4Down && !f4WasDown && client.screen == null) {
                 client.setScreen(new ClickGuiScreen(MODULES));
@@ -140,7 +140,7 @@ public class ExampleModClient implements ClientModInitializer {
     }
 
     // ==========================================
-    // CLICKGUI SCREEN (GLFW Mouse Input)
+    // CLICKGUI SCREEN
     // ==========================================
     public static class ClickGuiScreen extends Screen {
         private final List<Module> modules;
@@ -156,9 +156,9 @@ public class ExampleModClient implements ClientModInitializer {
 
         @Override
         public void render(GuiGraphics context, int mouseX, int mouseY, float delta) {
-            long window = Minecraft.getInstance().getWindow().getWindow();
-            boolean leftDown = GLFW.glfwGetMouseButton(window, GLFW.GLFW_MOUSE_BUTTON_LEFT) == GLFW.GLFW_PRESS;
-            boolean rightDown = GLFW.glfwGetMouseButton(window, GLFW.GLFW_MOUSE_BUTTON_RIGHT) == GLFW.GLFW_PRESS;
+            long window = GLFW.glfwGetCurrentContext();
+            boolean leftDown = window != 0 && GLFW.glfwGetMouseButton(window, GLFW.GLFW_MOUSE_BUTTON_LEFT) == GLFW.GLFW_PRESS;
+            boolean rightDown = window != 0 && GLFW.glfwGetMouseButton(window, GLFW.GLFW_MOUSE_BUTTON_RIGHT) == GLFW.GLFW_PRESS;
 
             if (!leftDown) {
                 draggingSlider = null;
