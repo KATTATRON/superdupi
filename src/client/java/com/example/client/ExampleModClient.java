@@ -5,22 +5,16 @@ import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
-import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
-import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
 import net.minecraft.client.Camera;
-import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
-import net.minecraft.resources.Identifier;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.entity.*;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.phys.Vec3;
-import org.joml.Matrix4f;
-import org.joml.Vector4f;
 import org.lwjgl.glfw.GLFW;
 
 import java.util.ArrayList;
@@ -32,37 +26,36 @@ public class ExampleModClient implements ClientModInitializer {
         new SpawnerFinder()
     );
 
-    private static KeyMapping clickGuiKey;
     private boolean f4WasDown = false;
+    private int scanTimer = 0;
 
     @Override
     public void onInitializeClient() {
-        // 1. Register Keybind properly for 1.21.11 Controls menu
-        KeyMapping.Category category = KeyMapping.Category.register(
-            Identifier.fromNamespaceAndPath("example", "general")
-        );
-        clickGuiKey = KeyBindingHelper.registerKeyBinding(new KeyMapping(
-            "ClickGUI",
-            InputConstants.Type.KEYSYM,
-            GLFW.GLFW_KEY_F4,
-            category
-        ));
-
-        // 2. Open ClickGUI via Keybind (or F4 fallback)
+        // Open ClickGUI with F4 + run block scanner when modules are active
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
-            while (clickGuiKey.consumeClick()) {
+            if (client.getWindow() == null) return;
+            boolean f4Down = InputConstants.isKeyDown(client.getWindow(), GLFW.GLFW_KEY_F4);
+
+            if (f4Down && !f4WasDown && client.screen == null) {
                 client.setScreen(new ClickGuiScreen(MODULES));
             }
-            if (client.getWindow() != null) {
-                boolean f4Down = InputConstants.isKeyDown(client.getWindow(), GLFW.GLFW_KEY_F4);
-                if (f4Down && !f4WasDown && client.screen == null) {
-                    client.setScreen(new ClickGuiScreen(MODULES));
+            f4WasDown = f4Down;
+
+            // Scan and highlight blocks every 20 ticks (1 second) when enabled
+            if (client.level != null && client.player != null) {
+                scanTimer++;
+                if (scanTimer >= 20) {
+                    scanTimer = 0;
+                    for (Module m : MODULES) {
+                        if (m.isEnabled()) {
+                            m.onTick(client);
+                        }
+                    }
                 }
-                f4WasDown = f4Down;
             }
         });
 
-        // 3. Backup Chat Command: /clickgui
+        // Backup Chat Command: /clickgui
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
             dispatcher.register(ClientCommandManager.literal("clickgui")
                 .executes(c -> {
@@ -70,18 +63,6 @@ public class ExampleModClient implements ClientModInitializer {
                     mc.execute(() -> mc.setScreen(new ClickGuiScreen(MODULES)));
                     return 1;
                 }));
-        });
-
-        // 4. Through-Wall ESP Overlay Renderer (1.21.11 compatible)
-        HudRenderCallback.EVENT.register((context, tickCounter) -> {
-            Minecraft mc = Minecraft.getInstance();
-            if (mc.level == null || mc.player == null || mc.options.hideGui) return;
-
-            for (Module mod : MODULES) {
-                if (mod.isEnabled()) {
-                    mod.onRenderOverlay(context);
-                }
-            }
         });
     }
 
@@ -137,15 +118,25 @@ public class ExampleModClient implements ClientModInitializer {
         private boolean enabled = false;
         private boolean expanded = false;
         protected final List<Setting<?>> settings = new ArrayList<>();
+        public final List<BlockPos> foundPositions = new ArrayList<>();
 
         public Module(String name) { this.name = name; }
-        public void toggle() { this.enabled = !this.enabled; }
+        public void toggle() {
+            this.enabled = !this.enabled;
+            Minecraft mc = Minecraft.getInstance();
+            if (mc.player != null) {
+                mc.player.displayClientMessage(
+                    Component.literal("§d[ClickGUI] §f" + name + ": " + (enabled ? "§aON" : "§cOFF")),
+                    true
+                );
+            }
+        }
         public boolean isEnabled() { return enabled; }
         public boolean isExpanded() { return expanded; }
         public void setExpanded(boolean expanded) { this.expanded = expanded; }
         public String getName() { return name; }
         public List<Setting<?>> getSettings() { return settings; }
-        public abstract void onRenderOverlay(GuiGraphics context);
+        public abstract void onTick(Minecraft mc);
     }
 
     public static class StorageFinder extends Module {
@@ -156,28 +147,21 @@ public class ExampleModClient implements ClientModInitializer {
         public final NumberSetting red = new NumberSetting("Red", 255, 0, 255, 1);
         public final NumberSetting green = new NumberSetting("Green", 180, 0, 255, 1);
         public final NumberSetting blue = new NumberSetting("Blue", 50, 0, 255, 1);
-        public final NumberSetting outlineAlpha = new NumberSetting("Outline Opacity", 255, 0, 255, 1);
-        public final NumberSetting fillAlpha = new NumberSetting("Fill Opacity", 60, 0, 255, 1);
 
         public StorageFinder() {
             super("StorageFinder");
-            settings.addAll(List.of(mode, chests, shulkers, droppers, red, green, blue, outlineAlpha, fillAlpha));
+            settings.addAll(List.of(mode, chests, shulkers, droppers, red, green, blue));
         }
 
         @Override
-        public void onRenderOverlay(GuiGraphics context) {
-            int r = red.getValue().intValue();
-            int g = green.getValue().intValue();
-            int b = blue.getValue().intValue();
-            int oA = outlineAlpha.getValue().intValue();
-            int fA = fillAlpha.getValue().intValue();
-
-            for (BlockEntity be : RenderUtils.getLoadedBlockEntities()) {
+        public void onTick(Minecraft mc) {
+            foundPositions.clear();
+            for (BlockEntity be : getLoadedBlockEntities(mc)) {
                 boolean valid = (chests.getValue() && (be instanceof ChestBlockEntity || be instanceof EnderChestBlockEntity || be instanceof BarrelBlockEntity))
                              || (shulkers.getValue() && be instanceof ShulkerBoxBlockEntity)
                              || (droppers.getValue() && (be instanceof DropperBlockEntity || be instanceof DispenserBlockEntity));
                 if (valid) {
-                    RenderUtils.drawProjectedBox(context, be.getBlockPos(), mode.getValue(), r, g, b, oA, fA);
+                    foundPositions.add(be.getBlockPos());
                 }
             }
         }
@@ -188,130 +172,38 @@ public class ExampleModClient implements ClientModInitializer {
         public final NumberSetting red = new NumberSetting("Red", 255, 0, 255, 1);
         public final NumberSetting green = new NumberSetting("Green", 50, 0, 255, 1);
         public final NumberSetting blue = new NumberSetting("Blue", 255, 0, 255, 1);
-        public final NumberSetting outlineAlpha = new NumberSetting("Outline Opacity", 255, 0, 255, 1);
-        public final NumberSetting fillAlpha = new NumberSetting("Fill Opacity", 75, 0, 255, 1);
 
         public SpawnerFinder() {
             super("SpawnerFinder");
-            settings.addAll(List.of(mode, red, green, blue, outlineAlpha, fillAlpha));
+            settings.addAll(List.of(mode, red, green, blue));
         }
 
         @Override
-        public void onRenderOverlay(GuiGraphics context) {
-            int r = red.getValue().intValue();
-            int g = green.getValue().intValue();
-            int b = blue.getValue().intValue();
-            int oA = outlineAlpha.getValue().intValue();
-            int fA = fillAlpha.getValue().intValue();
-
-            for (BlockEntity be : RenderUtils.getLoadedBlockEntities()) {
+        public void onTick(Minecraft mc) {
+            foundPositions.clear();
+            for (BlockEntity be : getLoadedBlockEntities(mc)) {
                 if (be instanceof SpawnerBlockEntity) {
-                    RenderUtils.drawProjectedBox(context, be.getBlockPos(), mode.getValue(), r, g, b, oA, fA);
+                    foundPositions.add(be.getBlockPos());
                 }
             }
         }
     }
 
-    // ==========================================
-    // THROUGH-WALL PROJECTION ENGINE (1.21.11)
-    // ==========================================
-    public static class RenderUtils {
-        private static final Minecraft mc = Minecraft.getInstance();
+    public static List<BlockEntity> getLoadedBlockEntities(Minecraft mc) {
+        List<BlockEntity> list = new ArrayList<>();
+        if (mc.level == null || mc.player == null) return list;
+        int renderDistance = mc.options.getEffectiveRenderDistance();
+        ChunkPos playerChunk = mc.player.chunkPosition();
 
-        public static List<BlockEntity> getLoadedBlockEntities() {
-            List<BlockEntity> list = new ArrayList<>();
-            if (mc.level == null || mc.player == null) return list;
-            int renderDistance = mc.options.getEffectiveRenderDistance();
-            ChunkPos playerChunk = mc.player.chunkPosition();
-
-            for (int x = -renderDistance; x <= renderDistance; x++) {
-                for (int z = -renderDistance; z <= renderDistance; z++) {
-                    LevelChunk chunk = mc.level.getChunkSource().getChunk(playerChunk.x + x, playerChunk.z + z, false);
-                    if (chunk != null) {
-                        list.addAll(chunk.getBlockEntities().values());
-                    }
+        for (int x = -renderDistance; x <= renderDistance; x++) {
+            for (int z = -renderDistance; z <= renderDistance; z++) {
+                LevelChunk chunk = mc.level.getChunkSource().getChunk(playerChunk.x + x, playerChunk.z + z, false);
+                if (chunk != null) {
+                    list.addAll(chunk.getBlockEntities().values());
                 }
             }
-            return list;
         }
-
-        public static void drawProjectedBox(GuiGraphics context, BlockPos pos, String mode, int r, int g, int b, int oA, int fA) {
-            Camera cam = mc.gameRenderer.getMainCamera();
-            Vec3 camPos = cam.getPosition();
-
-            double dx = (pos.getX() + 0.5) - camPos.x;
-            double dy = (pos.getY() + 0.5) - camPos.y;
-            double dz = (pos.getZ() + 0.5) - camPos.z;
-            double distSq = dx * dx + dy * dy + dz * dz;
-            if (distSq > 16384) return; // Max 128 blocks
-
-            float yaw = (float) Math.toRadians(cam.getYRot());
-            float pitch = (float) Math.toRadians(cam.getXRot());
-
-            Matrix4f view = new Matrix4f()
-                .rotationX(pitch)
-                .rotateY((float) (yaw + Math.PI));
-
-            double fov = mc.options.fov().get();
-            int sw = mc.getWindow().getGuiScaledWidth();
-            int sh = mc.getWindow().getGuiScaledHeight();
-            float aspect = (float) sw / (float) Math.max(1, sh);
-            Matrix4f proj = new Matrix4f().perspective((float) Math.toRadians(fov), aspect, 0.05f, 1000.0f);
-
-            float minX = Float.MAX_VALUE, minY = Float.MAX_VALUE;
-            float maxX = -Float.MAX_VALUE, maxY = -Float.MAX_VALUE;
-            int visibleCorners = 0;
-
-            for (int cx = 0; cx <= 1; cx++) {
-                for (int cy = 0; cy <= 1; cy++) {
-                    for (int cz = 0; cz <= 1; cz++) {
-                        float wx = (float) (pos.getX() + cx - camPos.x);
-                        float wy = (float) (pos.getY() + cy - camPos.y);
-                        float wz = (float) (pos.getZ() + cz - camPos.z);
-
-                        Vector4f v = new Vector4f(wx, wy, wz, 1.0f);
-                        v.mul(view);
-                        if (v.z >= -0.05f) continue; // Behind camera
-                        v.mul(proj);
-
-                        if (v.w <= 0.0f) continue;
-                        float ndcX = v.x / v.w;
-                        float ndcY = v.y / v.w;
-
-                        float sx = (ndcX + 1.0f) * 0.5f * sw;
-                        float sy = (1.0f - ndcY) * 0.5f * sh;
-
-                        minX = Math.min(minX, sx);
-                        minY = Math.min(minY, sy);
-                        maxX = Math.max(maxX, sx);
-                        maxY = Math.max(maxY, sy);
-                        visibleCorners++;
-                    }
-                }
-            }
-
-            if (visibleCorners == 0) return;
-
-            int x1 = Math.max(-20, (int) minX);
-            int y1 = Math.max(-20, (int) minY);
-            int x2 = Math.min(sw + 20, (int) maxX);
-            int y2 = Math.min(sh + 20, (int) maxY);
-
-            if (x2 <= x1 || y2 <= y1 || x2 < 0 || y2 < 0 || x1 > sw || y1 > sh) return;
-
-            int fillColor = ((fA & 0xFF) << 24) | ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF);
-            int outColor = ((oA & 0xFF) << 24) | ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF);
-
-            if (mode.equals("Fill") || mode.equals("Both")) {
-                context.fill(x1, y1, x2, y2, fillColor);
-            }
-            if (mode.equals("Outline") || mode.equals("Both")) {
-                context.fill(x1, y1, x2, y1 + 1, outColor);
-                context.fill(x1, y2 - 1, x2, y2, outColor);
-                context.fill(x1, y1, x1 + 1, y2, outColor);
-                context.fill(x2 - 1, y1, x2, y2, outColor);
-            }
-        }
+        return list;
     }
 
     // ==========================================
@@ -320,7 +212,7 @@ public class ExampleModClient implements ClientModInitializer {
     public static class ClickGuiScreen extends Screen {
         private final List<Module> modules;
         private NumberSetting draggingSlider = null;
-        private final int panelX = 40, panelY = 40, panelWidth = 170;
+        private final int panelX = 40, panelY = 40, panelWidth = 190;
         private boolean leftWasDown = false;
         private boolean rightWasDown = false;
 
@@ -331,9 +223,9 @@ public class ExampleModClient implements ClientModInitializer {
 
         @Override
         public void render(GuiGraphics context, int mouseX, int mouseY, float delta) {
-            // Reliable mouse button polling using Minecraft's active MouseHandler
-            boolean leftDown = Minecraft.getInstance().mouseHandler.isLeftPressed();
-            boolean rightDown = Minecraft.getInstance().mouseHandler.isRightPressed();
+            Minecraft mc = Minecraft.getInstance();
+            boolean leftDown = mc.mouseHandler.isLeftPressed();
+            boolean rightDown = mc.mouseHandler.isRightPressed();
 
             if (!leftDown) {
                 draggingSlider = null;
@@ -348,7 +240,15 @@ public class ExampleModClient implements ClientModInitializer {
             leftWasDown = leftDown;
             rightWasDown = rightDown;
 
-            context.fillGradient(0, 0, this.width, this.height, 0x7008080C, 0x9008080C);
+            // Draw ESP boxes on screen while GUI is open + list coordinates
+            for (Module mod : modules) {
+                if (mod.isEnabled()) {
+                    mod.onTick(mc);
+                    drawTargetsOnScreen(context, mc, mod);
+                }
+            }
+
+            context.fillGradient(0, 0, this.width, this.height, 0x5008080C, 0x7008080C);
             context.fill(panelX, panelY - 2, panelX + panelWidth, panelY, 0xFF8A2BE2);
             context.fill(panelX, panelY, panelX + panelWidth, panelY + 20, 0xF014141D);
             context.drawString(this.font, "✦ RENDER MODULES", panelX + 8, panelY + 6, 0xFFFFFFFF, true);
@@ -363,7 +263,8 @@ public class ExampleModClient implements ClientModInitializer {
                     context.fill(panelX, currentY, panelX + 3, currentY + 18, 0xFF8A2BE2);
                 }
 
-                context.drawString(this.font, mod.getName(), panelX + 8, currentY + 5, mod.isEnabled() ? 0xFFD8B4FE : 0xFFAAAAAA, true);
+                String label = mod.getName() + (mod.isEnabled() ? " [" + mod.foundPositions.size() + "]" : "");
+                context.drawString(this.font, label, panelX + 8, currentY + 5, mod.isEnabled() ? 0xFFD8B4FE : 0xFFAAAAAA, true);
                 context.drawString(this.font, mod.isExpanded() ? "▾" : "▸", panelX + panelWidth - 12, currentY + 5, 0xFF888888, true);
                 currentY += 18;
 
@@ -391,6 +292,58 @@ public class ExampleModClient implements ClientModInitializer {
                         }
                         currentY += 16;
                     }
+                }
+            }
+        }
+
+        private void drawTargetsOnScreen(GuiGraphics context, Minecraft mc, Module mod) {
+            if (mc.player == null) return;
+            Camera cam = mc.gameRenderer.getMainCamera();
+            Vec3 camPos = cam.getPosition();
+            float yaw = (float) Math.toRadians(cam.getYRot());
+            float pitch = (float) Math.toRadians(cam.getXRot());
+            double fov = mc.options.fov().get();
+            float f = (float) (1.0 / Math.tan(Math.toRadians(fov) / 2.0));
+            float aspect = (float) this.width / (float) Math.max(1, this.height);
+
+            float cosYaw = (float) Math.cos(yaw + Math.PI);
+            float sinYaw = (float) Math.sin(yaw + Math.PI);
+            float cosPitch = (float) Math.cos(pitch);
+            float sinPitch = (float) Math.sin(pitch);
+
+            int color = mod instanceof SpawnerFinder ? 0xFFFF32FF : 0xFFFFB432;
+
+            for (BlockPos pos : mod.foundPositions) {
+                float dx = (float) (pos.getX() + 0.5 - camPos.x);
+                float dy = (float) (pos.getY() + 0.5 - camPos.y);
+                float dz = (float) (pos.getZ() + 0.5 - camPos.z);
+
+                // Rotate by Yaw
+                float rx = dx * cosYaw + dz * sinYaw;
+                float rz = -dx * sinYaw + dz * cosYaw;
+
+                // Rotate by Pitch
+                float ry = dy * cosPitch - rz * sinPitch;
+                float finalZ = dy * sinPitch + rz * cosPitch;
+
+                if (finalZ >= -0.1f) continue; // Behind camera
+
+                float ndcX = (rx * (f / aspect)) / (-finalZ);
+                float ndcY = (ry * f) / (-finalZ);
+
+                int sx = (int) ((ndcX + 1.0f) * 0.5f * this.width);
+                int sy = (int) ((1.0f - ndcY) * 0.5f * this.height);
+
+                int dist = (int) Math.sqrt(dx * dx + dy * dy + dz * dz);
+                int boxSize = Math.max(4, Math.min(24, (int) (120.0f / Math.max(1, dist))));
+
+                if (sx >= 0 && sx <= this.width && sy >= 0 && sy <= this.height) {
+                    context.fill(sx - boxSize, sy - boxSize, sx + boxSize, sy + boxSize, 0x55FFB432);
+                    context.fill(sx - boxSize, sy - boxSize, sx + boxSize, sy - boxSize + 1, color);
+                    context.fill(sx - boxSize, sy + boxSize - 1, sx + boxSize, sy + boxSize, color);
+                    context.fill(sx - boxSize, sy - boxSize, sx - boxSize + 1, sy + boxSize, color);
+                    context.fill(sx + boxSize - 1, sy - boxSize, sx + boxSize, sy + boxSize, color);
+                    context.drawString(this.font, dist + "m", sx - 6, sy - boxSize - 10, 0xFFFFFFFF, true);
                 }
             }
         }
