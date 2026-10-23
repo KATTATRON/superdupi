@@ -1,23 +1,19 @@
 package com.example.client;
 
-import com.mojang.blaze3d.systems.RenderSystem;
-import com.mojang.blaze3d.vertex.*;
 import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
+import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
-import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
+import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.Screen;
-import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.entity.*;
 import net.minecraft.world.level.chunk.LevelChunk;
-import net.minecraft.world.phys.AABB;
-import net.minecraft.world.phys.Vec3;
-import org.joml.Matrix4f;
 import org.lwjgl.glfw.GLFW;
 
 import java.util.ArrayList;
@@ -33,7 +29,7 @@ public class ExampleModClient implements ClientModInitializer {
 
     @Override
     public void onInitializeClient() {
-        // F4 Keybind mit Category-Objekt statt String
+        // F4 Keybind registrieren
         clickGuiKey = KeyBindingHelper.registerKeyBinding(new KeyMapping(
             "key.example.clickgui",
             GLFW.GLFW_KEY_F4,
@@ -48,20 +44,26 @@ public class ExampleModClient implements ClientModInitializer {
         });
 
         // Chat-Befehl: /clickgui
-        net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
-            dispatcher.register(net.fabricmc.fabric.api.client.command.v2.ClientCommandManager.literal("clickgui")
+        ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
+            dispatcher.register(ClientCommandManager.literal("clickgui")
                 .executes(c -> {
                     Minecraft.getInstance().tell(() -> Minecraft.getInstance().setScreen(new ClickGuiScreen(MODULES)));
                     return 1;
                 }));
         });
 
-        // ESP Rendering
-        WorldRenderEvents.LAST.register(context -> {
-            for (Module mod : MODULES) {
-                if (mod.isEnabled()) {
-                    mod.onWorldRender(context.matrixStack());
-                }
+        // HUD / ESP Tracker Feedback
+        HudRenderCallback.EVENT.register((drawContext, tickCounter) -> {
+            Minecraft mc = Minecraft.getInstance();
+            if (mc.player == null || mc.level == null) return;
+
+            int activeCount = 0;
+            for (Module m : MODULES) {
+                if (m.isEnabled()) activeCount++;
+            }
+
+            if (activeCount > 0) {
+                drawContext.drawString(mc.font, "✦ Finder Active (" + activeCount + ") [F4]", 8, 8, 0xFF8A2BE2, true);
             }
         });
     }
@@ -126,7 +128,6 @@ public class ExampleModClient implements ClientModInitializer {
         public void setExpanded(boolean expanded) { this.expanded = expanded; }
         public String getName() { return name; }
         public List<Setting<?>> getSettings() { return settings; }
-        public abstract void onWorldRender(PoseStack matrices);
     }
 
     public static class StorageFinder extends Module {
@@ -144,24 +145,6 @@ public class ExampleModClient implements ClientModInitializer {
             super("StorageFinder");
             settings.addAll(List.of(mode, chests, shulkers, droppers, red, green, blue, outlineAlpha, fillAlpha));
         }
-
-        @Override
-        public void onWorldRender(PoseStack matrices) {
-            float r = red.getValue().floatValue() / 255f;
-            float g = green.getValue().floatValue() / 255f;
-            float b = blue.getValue().floatValue() / 255f;
-            float oA = outlineAlpha.getValue().floatValue() / 255f;
-            float fA = fillAlpha.getValue().floatValue() / 255f;
-
-            for (BlockEntity be : RenderUtils.getLoadedBlockEntities()) {
-                boolean valid = (chests.getValue() && (be instanceof ChestBlockEntity || be instanceof EnderChestBlockEntity || be instanceof BarrelBlockEntity))
-                             || (shulkers.getValue() && be instanceof ShulkerBoxBlockEntity)
-                             || (droppers.getValue() && (be instanceof DropperBlockEntity || be instanceof DispenserBlockEntity));
-                if (valid) {
-                    RenderUtils.drawEspBox(matrices, new AABB(be.getBlockPos()), mode.getValue(), r, g, b, oA, fA);
-                }
-            }
-        }
     }
 
     public static class SpawnerFinder extends Module {
@@ -175,142 +158,6 @@ public class ExampleModClient implements ClientModInitializer {
         public SpawnerFinder() {
             super("SpawnerFinder");
             settings.addAll(List.of(mode, red, green, blue, outlineAlpha, fillAlpha));
-        }
-
-        @Override
-        public void onWorldRender(PoseStack matrices) {
-            float r = red.getValue().floatValue() / 255f;
-            float g = green.getValue().floatValue() / 255f;
-            float b = blue.getValue().floatValue() / 255f;
-            float oA = outlineAlpha.getValue().floatValue() / 255f;
-            float fA = fillAlpha.getValue().floatValue() / 255f;
-
-            for (BlockEntity be : RenderUtils.getLoadedBlockEntities()) {
-                if (be instanceof SpawnerBlockEntity) {
-                    RenderUtils.drawEspBox(matrices, new AABB(be.getBlockPos()), mode.getValue(), r, g, b, oA, fA);
-                }
-            }
-        }
-    }
-
-    // ==========================================
-    // THROUGH-WALL RENDER ENGINE
-    // ==========================================
-    public static class RenderUtils {
-        private static final Minecraft mc = Minecraft.getInstance();
-
-        public static List<BlockEntity> getLoadedBlockEntities() {
-            List<BlockEntity> list = new ArrayList<>();
-            if (mc.level == null || mc.player == null) return list;
-            int renderDistance = mc.options.getEffectiveRenderDistance();
-            ChunkPos playerChunk = mc.player.chunkPosition();
-
-            for (int x = -renderDistance; x <= renderDistance; x++) {
-                for (int z = -renderDistance; z <= renderDistance; z++) {
-                    LevelChunk chunk = mc.level.getChunkSource().getChunk(playerChunk.x + x, playerChunk.z + z, false);
-                    if (chunk != null) {
-                        list.addAll(chunk.getBlockEntities().values());
-                    }
-                }
-            }
-            return list;
-        }
-
-        public static void drawEspBox(PoseStack matrices, AABB box, String mode, float r, float g, float b, float outlineAlpha, float fillAlpha) {
-            Vec3 cameraPos = mc.gameRenderer.getMainCamera().getPosition();
-            AABB shifted = box.move(-cameraPos.x, -cameraPos.y, -cameraPos.z);
-
-            matrices.pushPose();
-            Matrix4f matrix = matrices.last().pose();
-
-            RenderSystem.enableBlend();
-            RenderSystem.defaultBlendFunc();
-            RenderSystem.disableDepthTest();
-            RenderSystem.disableCull();
-
-            if (mode.equals("Fill") || mode.equals("Both")) {
-                drawFilledBox(matrix, shifted, r, g, b, fillAlpha);
-            }
-            if (mode.equals("Outline") || mode.equals("Both")) {
-                drawBoxOutline(matrix, shifted, r, g, b, outlineAlpha);
-            }
-
-            RenderSystem.enableCull();
-            RenderSystem.enableDepthTest();
-            RenderSystem.disableBlend();
-            matrices.popPose();
-        }
-
-        private static void drawFilledBox(Matrix4f matrix, AABB b, float red, float green, float blue, float alpha) {
-            BufferBuilder buffer = Tesselator.getInstance().begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION_COLOR);
-            float minX = (float) b.minX, minY = (float) b.minY, minZ = (float) b.minZ;
-            float maxX = (float) b.maxX, maxY = (float) b.maxY, maxZ = (float) b.maxZ;
-
-            buffer.addVertex(matrix, minX, minY, minZ).setColor(red, green, blue, alpha);
-            buffer.addVertex(matrix, maxX, minY, minZ).setColor(red, green, blue, alpha);
-            buffer.addVertex(matrix, maxX, minY, maxZ).setColor(red, green, blue, alpha);
-            buffer.addVertex(matrix, minX, minY, maxZ).setColor(red, green, blue, alpha);
-
-            buffer.addVertex(matrix, minX, maxY, minZ).setColor(red, green, blue, alpha);
-            buffer.addVertex(matrix, minX, maxY, maxZ).setColor(red, green, blue, alpha);
-            buffer.addVertex(matrix, maxX, maxY, maxZ).setColor(red, green, blue, alpha);
-            buffer.addVertex(matrix, maxX, maxY, minZ).setColor(red, green, blue, alpha);
-
-            buffer.addVertex(matrix, minX, minY, minZ).setColor(red, green, blue, alpha);
-            buffer.addVertex(matrix, minX, maxY, minZ).setColor(red, green, blue, alpha);
-            buffer.addVertex(matrix, maxX, maxY, minZ).setColor(red, green, blue, alpha);
-            buffer.addVertex(matrix, maxX, minY, minZ).setColor(red, green, blue, alpha);
-
-            buffer.addVertex(matrix, minX, minY, maxZ).setColor(red, green, blue, alpha);
-            buffer.addVertex(matrix, maxX, minY, maxZ).setColor(red, green, blue, alpha);
-            buffer.addVertex(matrix, maxX, maxY, maxZ).setColor(red, green, blue, alpha);
-            buffer.addVertex(matrix, minX, maxY, maxZ).setColor(red, green, blue, alpha);
-
-            buffer.addVertex(matrix, minX, minY, minZ).setColor(red, green, blue, alpha);
-            buffer.addVertex(matrix, minX, minY, maxZ).setColor(red, green, blue, alpha);
-            buffer.addVertex(matrix, minX, maxY, maxZ).setColor(red, green, blue, alpha);
-            buffer.addVertex(matrix, minX, maxY, minZ).setColor(red, green, blue, alpha);
-
-            buffer.addVertex(matrix, maxX, minY, minZ).setColor(red, green, blue, alpha);
-            buffer.addVertex(matrix, maxX, maxY, minZ).setColor(red, green, blue, alpha);
-            buffer.addVertex(matrix, maxX, maxY, maxZ).setColor(red, green, blue, alpha);
-            buffer.addVertex(matrix, maxX, minY, maxZ).setColor(red, green, blue, alpha);
-
-            MeshData mesh = buffer.build();
-            if (mesh != null) {
-                BufferUploader.drawWithShader(mesh);
-            }
-        }
-
-        private static void drawBoxOutline(Matrix4f matrix, AABB b, float red, float green, float blue, float alpha) {
-            BufferBuilder buffer = Tesselator.getInstance().begin(VertexFormat.Mode.DEBUG_LINES, DefaultVertexFormat.POSITION_COLOR);
-            float minX = (float) b.minX, minY = (float) b.minY, minZ = (float) b.minZ;
-            float maxX = (float) b.maxX, maxY = (float) b.maxY, maxZ = (float) b.maxZ;
-
-            line(buffer, matrix, minX, minY, minZ, maxX, minY, minZ, red, green, blue, alpha);
-            line(buffer, matrix, maxX, minY, minZ, maxX, minY, maxZ, red, green, blue, alpha);
-            line(buffer, matrix, maxX, minY, maxZ, minX, minY, maxZ, red, green, blue, alpha);
-            line(buffer, matrix, minX, minY, maxZ, minX, minY, minZ, red, green, blue, alpha);
-
-            line(buffer, matrix, minX, maxY, minZ, maxX, maxY, minZ, red, green, blue, alpha);
-            line(buffer, matrix, maxX, maxY, minZ, maxX, maxY, maxZ, red, green, blue, alpha);
-            line(buffer, matrix, maxX, maxY, maxZ, minX, maxY, maxZ, red, green, blue, alpha);
-            line(buffer, matrix, minX, maxY, maxZ, minX, maxY, minZ, red, green, blue, alpha);
-
-            line(buffer, matrix, minX, minY, minZ, minX, maxY, minZ, red, green, blue, alpha);
-            line(buffer, matrix, maxX, minY, minZ, maxX, maxY, minZ, red, green, blue, alpha);
-            line(buffer, matrix, maxX, minY, maxZ, maxX, maxY, maxZ, red, green, blue, alpha);
-            line(buffer, matrix, minX, minY, maxZ, minX, maxY, maxZ, red, green, blue, alpha);
-
-            MeshData mesh = buffer.build();
-            if (mesh != null) {
-                BufferUploader.drawWithShader(mesh);
-            }
-        }
-
-        private static void line(BufferBuilder buf, Matrix4f mat, float x1, float y1, float z1, float x2, float y2, float z2, float r, float g, float b, float a) {
-            buf.addVertex(mat, x1, y1, z1).setColor(r, g, b, a);
-            buf.addVertex(mat, x2, y2, z2).setColor(r, g, b, a);
         }
     }
 
