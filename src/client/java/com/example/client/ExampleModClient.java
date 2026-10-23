@@ -4,16 +4,10 @@ import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
-import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
-import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
-import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
-import net.minecraft.world.level.ChunkPos;
-import net.minecraft.world.level.block.entity.*;
-import net.minecraft.world.level.chunk.LevelChunk;
 import org.lwjgl.glfw.GLFW;
 
 import java.util.ArrayList;
@@ -25,46 +19,30 @@ public class ExampleModClient implements ClientModInitializer {
         new SpawnerFinder()
     );
 
-    private static KeyMapping clickGuiKey;
+    private boolean f4WasDown = false;
 
     @Override
     public void onInitializeClient() {
-        // F4 Keybind registrieren
-        clickGuiKey = KeyBindingHelper.registerKeyBinding(new KeyMapping(
-            "key.example.clickgui",
-            GLFW.GLFW_KEY_F4,
-            KeyMapping.CATEGORY_MISC
-        ));
-
-        // ClickGUI mit F4 öffnen
+        // ClickGUI direkt mit F4 öffnen (ohne KeyMapping-Versionskonflikt)
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
-            while (clickGuiKey.consumeClick()) {
+            if (client.getWindow() == null) return;
+            long window = client.getWindow().getWindow();
+            boolean f4Down = GLFW.glfwGetKey(window, GLFW.GLFW_KEY_F4) == GLFW.GLFW_PRESS;
+
+            if (f4Down && !f4WasDown && client.screen == null) {
                 client.setScreen(new ClickGuiScreen(MODULES));
             }
+            f4WasDown = f4Down;
         });
 
-        // Chat-Befehl: /clickgui
+        // Alternativer Chat-Befehl: /clickgui
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
             dispatcher.register(ClientCommandManager.literal("clickgui")
                 .executes(c -> {
-                    Minecraft.getInstance().tell(() -> Minecraft.getInstance().setScreen(new ClickGuiScreen(MODULES)));
+                    Minecraft mc = Minecraft.getInstance();
+                    mc.execute(() -> mc.setScreen(new ClickGuiScreen(MODULES)));
                     return 1;
                 }));
-        });
-
-        // HUD / ESP Tracker Feedback
-        HudRenderCallback.EVENT.register((drawContext, tickCounter) -> {
-            Minecraft mc = Minecraft.getInstance();
-            if (mc.player == null || mc.level == null) return;
-
-            int activeCount = 0;
-            for (Module m : MODULES) {
-                if (m.isEnabled()) activeCount++;
-            }
-
-            if (activeCount > 0) {
-                drawContext.drawString(mc.font, "✦ Finder Active (" + activeCount + ") [F4]", 8, 8, 0xFF8A2BE2, true);
-            }
         });
     }
 
@@ -162,12 +140,14 @@ public class ExampleModClient implements ClientModInitializer {
     }
 
     // ==========================================
-    // CLICKGUI SCREEN
+    // CLICKGUI SCREEN (GLFW Mouse Input)
     // ==========================================
     public static class ClickGuiScreen extends Screen {
         private final List<Module> modules;
         private NumberSetting draggingSlider = null;
         private final int panelX = 40, panelY = 40, panelWidth = 170;
+        private boolean leftWasDown = false;
+        private boolean rightWasDown = false;
 
         public ClickGuiScreen(List<Module> modules) {
             super(Component.literal("ClickGUI"));
@@ -176,6 +156,23 @@ public class ExampleModClient implements ClientModInitializer {
 
         @Override
         public void render(GuiGraphics context, int mouseX, int mouseY, float delta) {
+            long window = Minecraft.getInstance().getWindow().getWindow();
+            boolean leftDown = GLFW.glfwGetMouseButton(window, GLFW.GLFW_MOUSE_BUTTON_LEFT) == GLFW.GLFW_PRESS;
+            boolean rightDown = GLFW.glfwGetMouseButton(window, GLFW.GLFW_MOUSE_BUTTON_RIGHT) == GLFW.GLFW_PRESS;
+
+            if (!leftDown) {
+                draggingSlider = null;
+            } else if (!leftWasDown) {
+                handleMouseClick(mouseX, mouseY, 0);
+            }
+
+            if (rightDown && !rightWasDown) {
+                handleMouseClick(mouseX, mouseY, 1);
+            }
+
+            leftWasDown = leftDown;
+            rightWasDown = rightDown;
+
             context.fillGradient(0, 0, this.width, this.height, 0x7008080C, 0x9008080C);
             context.fill(panelX, panelY - 2, panelX + panelWidth, panelY, 0xFF8A2BE2);
             context.fill(panelX, panelY, panelX + panelWidth, panelY + 20, 0xF014141D);
@@ -223,14 +220,13 @@ public class ExampleModClient implements ClientModInitializer {
             }
         }
 
-        @Override
-        public boolean mouseClicked(double mouseX, double mouseY, int button) {
+        private void handleMouseClick(double mouseX, double mouseY, int button) {
             int currentY = panelY + 20;
             for (Module mod : modules) {
                 if (isHovered(mouseX, mouseY, panelX, currentY, panelWidth, 18)) {
                     if (button == 0) mod.toggle();
                     if (button == 1) mod.setExpanded(!mod.isExpanded());
-                    return true;
+                    return;
                 }
                 currentY += 18;
 
@@ -240,19 +236,12 @@ public class ExampleModClient implements ClientModInitializer {
                             if (setting instanceof BooleanSetting b) b.toggle();
                             else if (setting instanceof ModeSetting m) m.cycle();
                             else if (setting instanceof NumberSetting n) draggingSlider = n;
-                            return true;
+                            return;
                         }
                         currentY += 16;
                     }
                 }
             }
-            return super.mouseClicked(mouseX, mouseY, button);
-        }
-
-        @Override
-        public boolean mouseReleased(double mouseX, double mouseY, int button) {
-            draggingSlider = null;
-            return super.mouseReleased(mouseX, mouseY, button);
         }
 
         @Override
