@@ -5,6 +5,7 @@ import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.Screen;
@@ -30,7 +31,7 @@ public class ExampleModClient implements ClientModInitializer {
 
     @Override
     public void onInitializeClient() {
-        // ClickGUI mit F4 öffnen + Block-Scanner ausführen
+        // ClickGUI mit F4 öffnen + Block-Scanner im Hintergrund
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             if (client.getWindow() == null) return;
             boolean f4Down = InputConstants.isKeyDown(client.getWindow(), GLFW.GLFW_KEY_F4);
@@ -40,10 +41,9 @@ public class ExampleModClient implements ClientModInitializer {
             }
             f4WasDown = f4Down;
 
-            // Alle 20 Ticks (1 Sekunde) geladene BlockEntities scannen
             if (client.level != null && client.player != null) {
                 scanTimer++;
-                if (scanTimer >= 20) {
+                if (scanTimer >= 15) {
                     scanTimer = 0;
                     for (Module m : MODULES) {
                         if (m.isEnabled()) {
@@ -54,7 +54,23 @@ public class ExampleModClient implements ClientModInitializer {
             }
         });
 
-        // Alternativer Chat-Befehl: /clickgui
+        // Dauerhaftes 3D-ESP im Spiel (auch wenn F4 geschlossen ist!)
+        HudRenderCallback.EVENT.register((context, tickCounter) -> {
+            Minecraft mc = Minecraft.getInstance();
+            if (mc.level == null || mc.player == null || mc.options.hideGui) return;
+            // Nicht doppelt zeichnen, falls ClickGUI gerade offen ist
+            if (mc.screen instanceof ClickGuiScreen) return;
+
+            int sw = mc.getWindow().getGuiScaledWidth();
+            int sh = mc.getWindow().getGuiScaledHeight();
+            for (Module mod : MODULES) {
+                if (mod.isEnabled()) {
+                    EspRenderer.renderModuleEsp(context, mc, mod, sw, sh);
+                }
+            }
+        });
+
+        // Backup Chat-Befehl: /clickgui
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
             dispatcher.register(ClientCommandManager.literal("clickgui")
                 .executes(c -> {
@@ -119,13 +135,30 @@ public class ExampleModClient implements ClientModInitializer {
         protected final List<Setting<?>> settings = new ArrayList<>();
         public final List<BlockPos> foundPositions = new ArrayList<>();
 
-        public Module(String name) { this.name = name; }
+        public final ModeSetting mode = new ModeSetting("Mode", "Both", "Outline", "Fill", "Both");
+        public final NumberSetting red;
+        public final NumberSetting green;
+        public final NumberSetting blue;
+        public final NumberSetting outlineAlpha = new NumberSetting("Outline Opacity", 255, 0, 255, 1);
+        public final NumberSetting fillAlpha = new NumberSetting("Fill Opacity", 70, 0, 255, 1);
+        public final BooleanSetting tracers = new BooleanSetting("Tracers", false);
+
+        public Module(String name, double r, double g, double b) {
+            this.name = name;
+            this.red = new NumberSetting("Red", r, 0, 255, 1);
+            this.green = new NumberSetting("Green", g, 0, 255, 1);
+            this.blue = new NumberSetting("Blue", b, 0, 255, 1);
+        }
+
         public void toggle() {
             this.enabled = !this.enabled;
             Minecraft mc = Minecraft.getInstance();
+            if (this.enabled && mc.level != null) {
+                onTick(mc);
+            }
             if (mc.player != null) {
                 mc.player.displayClientMessage(
-                    Component.literal("§d[ClickGUI] §f" + name + ": " + (enabled ? "§aON" : "§cOFF")),
+                    Component.literal("§d[ESP] §f" + name + ": " + (enabled ? "§aON" : "§cOFF")),
                     true
                 );
             }
@@ -139,17 +172,13 @@ public class ExampleModClient implements ClientModInitializer {
     }
 
     public static class StorageFinder extends Module {
-        public final ModeSetting mode = new ModeSetting("Mode", "Both", "Outline", "Fill", "Both");
         public final BooleanSetting chests = new BooleanSetting("Chests", true);
         public final BooleanSetting shulkers = new BooleanSetting("Shulkers", true);
         public final BooleanSetting droppers = new BooleanSetting("Droppers", true);
-        public final NumberSetting red = new NumberSetting("Red", 255, 0, 255, 1);
-        public final NumberSetting green = new NumberSetting("Green", 180, 0, 255, 1);
-        public final NumberSetting blue = new NumberSetting("Blue", 50, 0, 255, 1);
 
         public StorageFinder() {
-            super("StorageFinder");
-            settings.addAll(List.of(mode, chests, shulkers, droppers, red, green, blue));
+            super("StorageFinder", 255, 180, 50);
+            settings.addAll(List.of(mode, chests, shulkers, droppers, tracers, red, green, blue, outlineAlpha, fillAlpha));
         }
 
         @Override
@@ -167,14 +196,9 @@ public class ExampleModClient implements ClientModInitializer {
     }
 
     public static class SpawnerFinder extends Module {
-        public final ModeSetting mode = new ModeSetting("Mode", "Both", "Outline", "Fill", "Both");
-        public final NumberSetting red = new NumberSetting("Red", 255, 0, 255, 1);
-        public final NumberSetting green = new NumberSetting("Green", 50, 0, 255, 1);
-        public final NumberSetting blue = new NumberSetting("Blue", 255, 0, 255, 1);
-
         public SpawnerFinder() {
-            super("SpawnerFinder");
-            settings.addAll(List.of(mode, red, green, blue));
+            super("SpawnerFinder", 255, 50, 255);
+            settings.addAll(List.of(mode, tracers, red, green, blue, outlineAlpha, fillAlpha));
         }
 
         @Override
@@ -206,6 +230,129 @@ public class ExampleModClient implements ClientModInitializer {
     }
 
     // ==========================================
+    // ECHTER 3D-BLOCK-PROJEKTIONS-RENDERER
+    // ==========================================
+    public static class EspRenderer {
+        private static final int[][] EDGES = {
+            {0,1}, {1,3}, {3,2}, {2,0}, // Unterseite
+            {4,5}, {5,7}, {7,6}, {6,4}, // Oberseite
+            {0,4}, {1,5}, {2,6}, {3,7}  // Vertikale Kanten
+        };
+
+        public static void renderModuleEsp(GuiGraphics context, Minecraft mc, Module mod, int sw, int sh) {
+            if (mc.player == null) return;
+            Vec3 camPos = mc.player.getEyePosition();
+            float yaw = (float) Math.toRadians(mc.player.getYRot());
+            float pitch = (float) Math.toRadians(mc.player.getXRot());
+            double fov = mc.options.fov().get();
+            float f = (float) (1.0 / Math.tan(Math.toRadians(fov) / 2.0));
+            float aspect = (float) sw / (float) Math.max(1, sh);
+
+            float cosYaw = (float) Math.cos(yaw + Math.PI);
+            float sinYaw = (float) Math.sin(yaw + Math.PI);
+            float cosPitch = (float) Math.cos(pitch);
+            float sinPitch = (float) Math.sin(pitch);
+
+            int r = mod.red.getValue().intValue();
+            int g = mod.green.getValue().intValue();
+            int b = mod.blue.getValue().intValue();
+            int oA = mod.outlineAlpha.getValue().intValue();
+            int fA = mod.fillAlpha.getValue().intValue();
+
+            int outlineColor = ((oA & 0xFF) << 24) | ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF);
+            int fillColor = ((fA & 0xFF) << 24) | ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF);
+            String renderMode = mod.mode.getValue();
+
+            for (BlockPos pos : mod.foundPositions) {
+                int[] sx = new int[8];
+                int[] sy = new int[8];
+                boolean allVisible = true;
+                int minX = Integer.MAX_VALUE, minY = Integer.MAX_VALUE;
+                int maxX = Integer.MIN_VALUE, maxY = Integer.MIN_VALUE;
+
+                // Alle 8 Ecken des 1x1x1 Blocks in 3D projizieren
+                for (int i = 0; i < 8; i++) {
+                    float cx = pos.getX() + ((i & 1) != 0 ? 1.0f : 0.0f) - (float) camPos.x;
+                    float cy = pos.getY() + ((i & 2) != 0 ? 1.0f : 0.0f) - (float) camPos.y;
+                    float cz = pos.getZ() + ((i & 4) != 0 ? 1.0f : 0.0f) - (float) camPos.z;
+
+                    float rx = cx * cosYaw + cz * sinYaw;
+                    float rz = -cx * sinYaw + cz * cosYaw;
+
+                    float ry = cy * cosPitch - rz * sinPitch;
+                    float finalZ = cy * sinPitch + rz * cosPitch;
+
+                    if (finalZ >= -0.05f) {
+                        allVisible = false;
+                        break;
+                    }
+
+                    float ndcX = (rx * (f / aspect)) / (-finalZ);
+                    float ndcY = (ry * f) / (-finalZ);
+
+                    sx[i] = (int) ((ndcX + 1.0f) * 0.5f * sw);
+                    sy[i] = (int) ((1.0f - ndcY) * 0.5f * sh);
+
+                    minX = Math.min(minX, sx[i]);
+                    minY = Math.min(minY, sy[i]);
+                    maxX = Math.max(maxX, sx[i]);
+                    maxY = Math.max(maxY, sy[i]);
+                }
+
+                if (!allVisible) continue;
+                if (maxX < 0 || maxY < 0 || minX > sw || minY > sh) continue;
+
+                // 1. Fill zeichnen (wenn Fill oder Both aktiv)
+                if (renderMode.equals("Fill") || renderMode.equals("Both")) {
+                    int fx1 = Math.max(0, minX);
+                    int fy1 = Math.max(0, minY);
+                    int fx2 = Math.min(sw, maxX);
+                    int fy2 = Math.min(sh, maxY);
+                    if (fx2 > fx1 && fy2 > fy1) {
+                        context.fill(fx1, fy1, fx2, fy2, fillColor);
+                    }
+                }
+
+                // 2. Echte 3D-Kanten (12 Linien des Würfels) zeichnen
+                if (renderMode.equals("Outline") || renderMode.equals("Both")) {
+                    for (int[] edge : EDGES) {
+                        drawLine(context, sx[edge[0]], sy[edge[0]], sx[edge[1]], sy[edge[1]], outlineColor, sw, sh);
+                    }
+                }
+
+                // 3. Optional: Tracer-Linie von der Bildschirmmitte zum Block
+                if (mod.tracers.getValue()) {
+                    int centerX = (minX + maxX) / 2;
+                    int centerY = (minY + maxY) / 2;
+                    drawLine(context, sw / 2, sh / 2, centerX, centerY, outlineColor, sw, sh);
+                }
+            }
+        }
+
+        private static void drawLine(GuiGraphics context, int x1, int y1, int x2, int y2, int color, int sw, int sh) {
+            int dx = x2 - x1;
+            int dy = y2 - y1;
+            int steps = Math.max(Math.abs(dx), Math.abs(dy));
+            if (steps == 0 || steps > 2500) return;
+
+            float xInc = dx / (float) steps;
+            float yInc = dy / (float) steps;
+            float x = x1;
+            float y = y1;
+
+            for (int i = 0; i <= steps; i++) {
+                int px = (int) x;
+                int py = (int) y;
+                if (px >= 0 && px < sw && py >= 0 && py < sh) {
+                    context.fill(px, py, px + 1, py + 1, color);
+                }
+                x += xInc;
+                y += yInc;
+            }
+        }
+    }
+
+    // ==========================================
     // CLICKGUI SCREEN
     // ==========================================
     public static class ClickGuiScreen extends Screen {
@@ -218,6 +365,12 @@ public class ExampleModClient implements ClientModInitializer {
         public ClickGuiScreen(List<Module> modules) {
             super(Component.literal("ClickGUI"));
             this.modules = modules;
+        }
+
+        // Überschreibt den starken Hintergrund-Blur in 1.21+, damit man das Spiel beim Einstellen klar sieht
+        @Override
+        public void renderBackground(GuiGraphics context, int mouseX, int mouseY, float delta) {
+            // Leer lassen -> kein verschwommener Hintergrund!
         }
 
         @Override
@@ -240,15 +393,13 @@ public class ExampleModClient implements ClientModInitializer {
             leftWasDown = leftDown;
             rightWasDown = rightDown;
 
-            // Zeichne gefundene Blöcke als ESP-Boxen auf den Bildschirm
+            // ESP auch live im Hintergrund weiterzeichnen, während das Menü offen ist
             for (Module mod : modules) {
                 if (mod.isEnabled()) {
-                    mod.onTick(mc);
-                    drawTargetsOnScreen(context, mc, mod);
+                    EspRenderer.renderModuleEsp(context, mc, mod, this.width, this.height);
                 }
             }
 
-            context.fillGradient(0, 0, this.width, this.height, 0x5008080C, 0x7008080C);
             context.fill(panelX, panelY - 2, panelX + panelWidth, panelY, 0xFF8A2BE2);
             context.fill(panelX, panelY, panelX + panelWidth, panelY + 20, 0xF014141D);
             context.drawString(this.font, "✦ RENDER MODULES", panelX + 8, panelY + 6, 0xFFFFFFFF, true);
@@ -292,55 +443,6 @@ public class ExampleModClient implements ClientModInitializer {
                         }
                         currentY += 16;
                     }
-                }
-            }
-        }
-
-        private void drawTargetsOnScreen(GuiGraphics context, Minecraft mc, Module mod) {
-            if (mc.player == null) return;
-            Vec3 camPos = mc.player.getEyePosition();
-            float yaw = (float) Math.toRadians(mc.player.getYRot());
-            float pitch = (float) Math.toRadians(mc.player.getXRot());
-            double fov = mc.options.fov().get();
-            float f = (float) (1.0 / Math.tan(Math.toRadians(fov) / 2.0));
-            float aspect = (float) this.width / (float) Math.max(1, this.height);
-
-            float cosYaw = (float) Math.cos(yaw + Math.PI);
-            float sinYaw = (float) Math.sin(yaw + Math.PI);
-            float cosPitch = (float) Math.cos(pitch);
-            float sinPitch = (float) Math.sin(pitch);
-
-            int color = mod instanceof SpawnerFinder ? 0xFFFF32FF : 0xFFFFB432;
-
-            for (BlockPos pos : mod.foundPositions) {
-                float dx = (float) (pos.getX() + 0.5 - camPos.x);
-                float dy = (float) (pos.getY() + 0.5 - camPos.y);
-                float dz = (float) (pos.getZ() + 0.5 - camPos.z);
-
-                float rx = dx * cosYaw + dz * sinYaw;
-                float rz = -dx * sinYaw + dz * cosYaw;
-
-                float ry = dy * cosPitch - rz * sinPitch;
-                float finalZ = dy * sinPitch + rz * cosPitch;
-
-                if (finalZ >= -0.1f) continue;
-
-                float ndcX = (rx * (f / aspect)) / (-finalZ);
-                float ndcY = (ry * f) / (-finalZ);
-
-                int sx = (int) ((ndcX + 1.0f) * 0.5f * this.width);
-                int sy = (int) ((1.0f - ndcY) * 0.5f * this.height);
-
-                int dist = (int) Math.sqrt(dx * dx + dy * dy + dz * dz);
-                int boxSize = Math.max(4, Math.min(24, (int) (120.0f / Math.max(1, dist))));
-
-                if (sx >= 0 && sx <= this.width && sy >= 0 && sy <= this.height) {
-                    context.fill(sx - boxSize, sy - boxSize, sx + boxSize, sy + boxSize, 0x55FFB432);
-                    context.fill(sx - boxSize, sy - boxSize, sx + boxSize, sy - boxSize + 1, color);
-                    context.fill(sx - boxSize, sy + boxSize - 1, sx + boxSize, sy + boxSize, color);
-                    context.fill(sx - boxSize, sy - boxSize, sx - boxSize + 1, sy + boxSize, color);
-                    context.fill(sx + boxSize - 1, sy - boxSize, sx + boxSize, sy + boxSize, color);
-                    context.drawString(this.font, dist + "m", sx - 6, sy - boxSize - 10, 0xFFFFFFFF, true);
                 }
             }
         }
