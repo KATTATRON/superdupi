@@ -5,7 +5,6 @@ import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
-import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.Screen;
@@ -31,7 +30,7 @@ public class ExampleModClient implements ClientModInitializer {
 
     @Override
     public void onInitializeClient() {
-        // Open ClickGUI with F4 + run block scanner when modules are active
+        // ClickGUI mit F4 öffnen + Block-Scanner ausführen
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             if (client.getWindow() == null) return;
             boolean f4Down = InputConstants.isKeyDown(client.getWindow(), GLFW.GLFW_KEY_F4);
@@ -41,7 +40,7 @@ public class ExampleModClient implements ClientModInitializer {
             }
             f4WasDown = f4Down;
 
-            // Scan and highlight blocks every 20 ticks (1 second) when enabled
+            // Alle 20 Ticks (1 Sekunde) geladene BlockEntities scannen
             if (client.level != null && client.player != null) {
                 scanTimer++;
                 if (scanTimer >= 20) {
@@ -55,7 +54,7 @@ public class ExampleModClient implements ClientModInitializer {
             }
         });
 
-        // Backup Chat Command: /clickgui
+        // Alternativer Chat-Befehl: /clickgui
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
             dispatcher.register(ClientCommandManager.literal("clickgui")
                 .executes(c -> {
@@ -224,8 +223,9 @@ public class ExampleModClient implements ClientModInitializer {
         @Override
         public void render(GuiGraphics context, int mouseX, int mouseY, float delta) {
             Minecraft mc = Minecraft.getInstance();
-            boolean leftDown = mc.mouseHandler.isLeftPressed();
-            boolean rightDown = mc.mouseHandler.isRightPressed();
+            long windowHandle = mc.getWindow().handle();
+            boolean leftDown = GLFW.glfwGetMouseButton(windowHandle, GLFW.GLFW_MOUSE_BUTTON_LEFT) == GLFW.GLFW_PRESS;
+            boolean rightDown = GLFW.glfwGetMouseButton(windowHandle, GLFW.GLFW_MOUSE_BUTTON_RIGHT) == GLFW.GLFW_PRESS;
 
             if (!leftDown) {
                 draggingSlider = null;
@@ -240,7 +240,7 @@ public class ExampleModClient implements ClientModInitializer {
             leftWasDown = leftDown;
             rightWasDown = rightDown;
 
-            // Draw ESP boxes on screen while GUI is open + list coordinates
+            // Zeichne gefundene Blöcke als ESP-Boxen auf den Bildschirm
             for (Module mod : modules) {
                 if (mod.isEnabled()) {
                     mod.onTick(mc);
@@ -298,10 +298,9 @@ public class ExampleModClient implements ClientModInitializer {
 
         private void drawTargetsOnScreen(GuiGraphics context, Minecraft mc, Module mod) {
             if (mc.player == null) return;
-            Camera cam = mc.gameRenderer.getMainCamera();
-            Vec3 camPos = cam.getPosition();
-            float yaw = (float) Math.toRadians(cam.getYRot());
-            float pitch = (float) Math.toRadians(cam.getXRot());
+            Vec3 camPos = mc.player.getEyePosition();
+            float yaw = (float) Math.toRadians(mc.player.getYRot());
+            float pitch = (float) Math.toRadians(mc.player.getXRot());
             double fov = mc.options.fov().get();
             float f = (float) (1.0 / Math.tan(Math.toRadians(fov) / 2.0));
             float aspect = (float) this.width / (float) Math.max(1, this.height);
@@ -318,15 +317,13 @@ public class ExampleModClient implements ClientModInitializer {
                 float dy = (float) (pos.getY() + 0.5 - camPos.y);
                 float dz = (float) (pos.getZ() + 0.5 - camPos.z);
 
-                // Rotate by Yaw
                 float rx = dx * cosYaw + dz * sinYaw;
                 float rz = -dx * sinYaw + dz * cosYaw;
 
-                // Rotate by Pitch
                 float ry = dy * cosPitch - rz * sinPitch;
                 float finalZ = dy * sinPitch + rz * cosPitch;
 
-                if (finalZ >= -0.1f) continue; // Behind camera
+                if (finalZ >= -0.1f) continue;
 
                 float ndcX = (rx * (f / aspect)) / (-finalZ);
                 float ndcY = (ry * f) / (-finalZ);
