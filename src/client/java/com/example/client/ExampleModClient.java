@@ -36,9 +36,9 @@ public class ExampleModClient implements ClientModInitializer {
 
     @Override
     public void onInitializeClient() {
-        // F4 Keybind + Block-Scanner + Freecam Bewegung
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             if (client.getWindow() == null) return;
+            long window = client.getWindow().handle();
             boolean f4Down = InputConstants.isKeyDown(client.getWindow(), GLFW.GLFW_KEY_F4);
 
             if (f4Down && !f4WasDown && client.screen == null) {
@@ -46,7 +46,6 @@ public class ExampleModClient implements ClientModInitializer {
             }
             f4WasDown = f4Down;
 
-            // Block-Entities scannen, wenn Module aktiv sind
             if (client.level != null && client.player != null) {
                 scanTimer++;
                 if (scanTimer >= 10) {
@@ -59,7 +58,7 @@ public class ExampleModClient implements ClientModInitializer {
                 }
             }
 
-            // Freecam Bewegungslogik
+            // Freecam Bewegungslogik (stabil über GLFW)
             Freecam freecamMod = null;
             for (Module m : MODULES) {
                 if (m instanceof Freecam f) {
@@ -74,10 +73,10 @@ public class ExampleModClient implements ClientModInitializer {
                 double rad = Math.toRadians(client.player.getYRot());
                 double forward = 0, strafe = 0;
 
-                if (client.options.upKey.isDown()) forward += 1;
-                if (client.options.downKey.isDown()) forward -= 1;
-                if (client.options.leftKey.isDown()) strafe += 1;
-                if (client.options.rightKey.isDown()) strafe -= 1;
+                if (GLFW.glfwGetKey(window, GLFW.GLFW_KEY_W) == GLFW.GLFW_PRESS) forward += 1;
+                if (GLFW.glfwGetKey(window, GLFW.GLFW_KEY_S) == GLFW.GLFW_PRESS) forward -= 1;
+                if (GLFW.glfwGetKey(window, GLFW.GLFW_KEY_A) == GLFW.GLFW_PRESS) strafe += 1;
+                if (GLFW.glfwGetKey(window, GLFW.GLFW_KEY_D) == GLFW.GLFW_PRESS) strafe -= 1;
 
                 if (forward != 0 || strafe != 0) {
                     double cos = Math.cos(rad);
@@ -86,12 +85,11 @@ public class ExampleModClient implements ClientModInitializer {
                     Freecam.camZ += (forward * sin + strafe * cos) * spd;
                 }
 
-                if (client.options.jumpKey.isDown()) Freecam.camY += spd;
-                if (client.options.shiftKey.isDown()) Freecam.camY -= spd;
+                if (GLFW.glfwGetKey(window, GLFW.GLFW_KEY_SPACE) == GLFW.GLFW_PRESS) Freecam.camY += spd;
+                if (GLFW.glfwGetKey(window, GLFW.GLFW_KEY_LEFT_SHIFT) == GLFW.GLFW_PRESS) Freecam.camY -= spd;
             }
         });
 
-        // Dauerhaftes 3D-ESP auf dem HUD
         HudRenderCallback.EVENT.register((context, tickCounter) -> {
             Minecraft mc = Minecraft.getInstance();
             if (mc.level == null || mc.player == null || mc.options.hideGui) return;
@@ -108,7 +106,6 @@ public class ExampleModClient implements ClientModInitializer {
             }
         });
 
-        // Chat-Befehl: /clickgui
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
             dispatcher.register(ClientCommandManager.literal("clickgui")
                 .executes(c -> {
@@ -119,9 +116,6 @@ public class ExampleModClient implements ClientModInitializer {
         });
     }
 
-    // ==========================================
-    // TARGET DATA HOLDER
-    // ==========================================
     public static class RenderTarget {
         public final BlockPos pos;
         public final float minX, minY, minZ, maxX, maxY, maxZ;
@@ -135,9 +129,6 @@ public class ExampleModClient implements ClientModInitializer {
         }
     }
 
-    // ==========================================
-    // SETTINGS SYSTEM
-    // ==========================================
     public static abstract class Setting<T> {
         private final String name;
         protected T value;
@@ -179,9 +170,6 @@ public class ExampleModClient implements ClientModInitializer {
         public double getMax() { return max; }
     }
 
-    // ==========================================
-    // MODULES
-    // ==========================================
     public static abstract class Module {
         private final String name;
         private boolean enabled = false;
@@ -319,9 +307,7 @@ public class ExampleModClient implements ClientModInitializer {
         }
 
         @Override
-        public void onTick(Minecraft mc) {
-            // Keine Blocksuche nötig
-        }
+        public void onTick(Minecraft mc) {}
     }
 
     public static List<BlockEntity> getLoadedBlockEntities(Minecraft mc) {
@@ -341,9 +327,6 @@ public class ExampleModClient implements ClientModInitializer {
         return list;
     }
 
-    // ==========================================
-    // 3D PROJECTION ENGINE
-    // ==========================================
     public static class EspRenderer {
         private static final int[][] EDGES = {
             {0,1}, {1,3}, {3,2}, {2,0},
@@ -549,9 +532,6 @@ public class ExampleModClient implements ClientModInitializer {
         }
     }
 
-    // ==========================================
-    // CLICKGUI SCREEN
-    // ==========================================
     public static class ClickGuiScreen extends Screen {
         private final List<Module> modules;
         private NumberSetting draggingSlider = null;
@@ -565,9 +545,7 @@ public class ExampleModClient implements ClientModInitializer {
         }
 
         @Override
-        public void renderBackground(GuiGraphics context, int mouseX, int mouseY, float delta) {
-            // Kein Blur-Hintergrund
-        }
+        public void renderBackground(GuiGraphics context, int mouseX, int mouseY, float delta) {}
 
         @Override
         public void render(GuiGraphics context, int mouseX, int mouseY, float delta) {
