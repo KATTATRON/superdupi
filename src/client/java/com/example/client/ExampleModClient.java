@@ -28,7 +28,9 @@ import org.lwjgl.glfw.GLFW;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 public class ExampleModClient implements ClientModInitializer {
     public static final Freecam FREECAM = new Freecam();
@@ -71,7 +73,6 @@ public class ExampleModClient implements ClientModInitializer {
             }
             f4WasDown = f4Down;
 
-            // Fixed F6 Freecam Keybind (Direct GLFW Window state check)
             boolean f6Pressed = GLFW.glfwGetKey(window, GLFW.GLFW_KEY_F6) == GLFW.GLFW_PRESS;
             if (f6Pressed && !f6WasDown && client.screen == null) {
                 FREECAM.toggle();
@@ -80,7 +81,7 @@ public class ExampleModClient implements ClientModInitializer {
 
             if (client.level != null && client.player != null) {
                 scanTimer++;
-                if (scanTimer >= 12) {
+                if (scanTimer >= 15) {
                     scanTimer = 0;
                     BlockScanner.scanAllEnabled(client, MODULES);
                 }
@@ -258,7 +259,6 @@ public class ExampleModClient implements ClientModInitializer {
         public SpawnerESP() { super("Spawners", 255, 50, 120, true); }
     }
 
-    // Amethyst Geode ESP: Box scales larger depending on how full-grown the amethyst clusters are!
     public static class AmethystGeodeESP extends Module {
         public AmethystGeodeESP() { super("Amethyst Geode", 180, 85, 255, true); }
     }
@@ -319,6 +319,10 @@ public class ExampleModClient implements ClientModInitializer {
             int renderDistance = mc.options.getEffectiveRenderDistance();
             ChunkPos playerChunk = mc.player.chunkPosition();
 
+            // Temporary list to collect raw geode crystal positions for clustering
+            List<BlockPos> rawClusters = new ArrayList<>();
+            int totalClustersFound = 0;
+
             for (int cx = -renderDistance; cx <= renderDistance; cx++) {
                 for (int cz = -renderDistance; cz <= renderDistance; cz++) {
                     LevelChunk chunk = mc.level.getChunkSource().getChunk(playerChunk.x + cx, playerChunk.z + cz, false);
@@ -345,49 +349,42 @@ public class ExampleModClient implements ClientModInitializer {
                         }
                     }
 
-                    if ((pistonMod != null && pistonMod.targets.size() < 600) || (geodeMod != null && geodeMod.targets.size() < 200)) {
-                        LevelChunkSection[] sections = chunk.getSections();
-                        int minY = getChunkMinY(chunk);
-                        int baseX = chunk.getPos().getMinBlockX();
-                        int baseZ = chunk.getPos().getMinBlockZ();
+                    LevelChunkSection[] sections = chunk.getSections();
+                    int minY = getChunkMinY(chunk);
+                    int baseX = chunk.getPos().getMinBlockX();
+                    int baseZ = chunk.getPos().getMinBlockZ();
 
-                        for (int sIdx = 0; sIdx < sections.length; sIdx++) {
-                            LevelChunkSection section = sections[sIdx];
-                            if (section == null || section.hasOnlyAir()) continue;
+                    for (int sIdx = 0; sIdx < sections.length; sIdx++) {
+                        LevelChunkSection section = sections[sIdx];
+                        if (section == null || section.hasOnlyAir()) continue;
 
-                            boolean wantPistons = pistonMod != null && pistonMod.targets.size() < 600;
-                            boolean wantGeodes = geodeMod != null && geodeMod.targets.size() < 200;
+                        boolean wantPistons = pistonMod != null && pistonMod.targets.size() < 600;
+                        boolean wantGeodes = geodeMod != null && totalClustersFound < 300;
 
-                            if (wantPistons && section.maybeHas(state -> state.is(Blocks.PISTON) || state.is(Blocks.STICKY_PISTON))) {
-                                int sectionBaseY = minY + (sIdx << 4);
-                                for (int y = 0; y < 16; y++) {
-                                    for (int z = 0; z < 16; z++) {
-                                        for (int x = 0; x < 16; x++) {
-                                            BlockState state = section.getBlockState(x, y, z);
-                                            if (state.is(Blocks.PISTON) || state.is(Blocks.STICKY_PISTON)) {
-                                                pistonMod.targets.add(new RenderTarget(new BlockPos(baseX + x, sectionBaseY + y, baseZ + z)));
-                                            }
+                        if (wantPistons && section.maybeHas(state -> state.is(Blocks.PISTON) || state.is(Blocks.STICKY_PISTON))) {
+                            int sectionBaseY = minY + (sIdx << 4);
+                            for (int y = 0; y < 16; y++) {
+                                for (int z = 0; z < 16; z++) {
+                                    for (int x = 0; x < 16; x++) {
+                                        BlockState state = section.getBlockState(x, y, z);
+                                        if (state.is(Blocks.PISTON) || state.is(Blocks.STICKY_PISTON)) {
+                                            pistonMod.targets.add(new RenderTarget(new BlockPos(baseX + x, sectionBaseY + y, baseZ + z)));
                                         }
                                     }
                                 }
                             }
+                        }
 
-                            if (wantGeodes && section.maybeHas(state -> state.is(Blocks.BUDDING_AMETHYST) || state.is(Blocks.LARGE_AMETHYST_BUD) || state.is(Blocks.MEDIUM_AMETHYST_BUD) || state.is(Blocks.SMALL_AMETHYST_BUD) || state.is(Blocks.AMETHYST_CLUSTER))) {
-                                int sectionBaseY = minY + (sIdx << 4);
-                                for (int y = 0; y < 16; y++) {
-                                    for (int z = 0; z < 16; z++) {
-                                        for (int x = 0; x < 16; x++) {
-                                            BlockState state = section.getBlockState(x, y, z);
-                                            // Scale bounding box larger based on amethyst growth stage!
-                                            if (state.is(Blocks.AMETHYST_CLUSTER)) {
-                                                geodeMod.targets.add(new RenderTarget(new BlockPos(baseX + x, sectionBaseY + y, baseZ + z), -0.4f, -0.4f, -0.4f, 1.4f, 1.4f, 1.4f));
-                                            } else if (state.is(Blocks.LARGE_AMETHYST_BUD)) {
-                                                geodeMod.targets.add(new RenderTarget(new BlockPos(baseX + x, sectionBaseY + y, baseZ + z), -0.25f, -0.25f, -0.25f, 1.25f, 1.25f, 1.25f));
-                                            } else if (state.is(Blocks.MEDIUM_AMETHYST_BUD)) {
-                                                geodeMod.targets.add(new RenderTarget(new BlockPos(baseX + x, sectionBaseY + y, baseZ + z), -0.1f, -0.1f, -0.1f, 1.1f, 1.1f, 1.1f));
-                                            } else if (state.is(Blocks.SMALL_AMETHYST_BUD) || state.is(Blocks.BUDDING_AMETHYST)) {
-                                                geodeMod.targets.add(new RenderTarget(new BlockPos(baseX + x, sectionBaseY + y, baseZ + z)));
-                                            }
+                        // Collect grown amethyst clusters to group into single geode boxes
+                        if (wantGeodes && section.maybeHas(state -> state.is(Blocks.LARGE_AMETHYST_BUD) || state.is(Blocks.MEDIUM_AMETHYST_BUD) || state.is(Blocks.SMALL_AMETHYST_BUD) || state.is(Blocks.AMETHYST_CLUSTER))) {
+                            int sectionBaseY = minY + (sIdx << 4);
+                            for (int y = 0; y < 16; y++) {
+                                for (int z = 0; z < 16; z++) {
+                                    for (int x = 0; x < 16; x++) {
+                                        BlockState state = section.getBlockState(x, y, z);
+                                        if (state.is(Blocks.LARGE_AMETHYST_BUD) || state.is(Blocks.MEDIUM_AMETHYST_BUD) || state.is(Blocks.AMETHYST_CLUSTER)) {
+                                            rawClusters.add(new BlockPos(baseX + x, sectionBaseY + y, baseZ + z));
+                                            totalClustersFound++;
                                         }
                                     }
                                 }
@@ -396,6 +393,53 @@ public class ExampleModClient implements ClientModInitializer {
                     }
                 }
             }
+
+            // Cluster raw amethyst points into distinct geodes (1 box per geode cavern)
+            if (geodeMod != null && !rawClusters.isEmpty()) {
+                List<GeodeCluster> geodes = new ArrayList<>();
+                for (BlockPos p : rawClusters) {
+                    GeodeCluster closest = null;
+                    for (GeodeCluster g : geodes) {
+                        if (g.center.closerThan(p, 14.0)) {
+                            closest = g;
+                            break;
+                        }
+                    }
+                    if (closest != null) {
+                        closest.add(p);
+                    } else {
+                        geodes.add(new GeodeCluster(p));
+                    }
+                }
+
+                // Turn each geode cluster into a dynamic target whose size scales with maturity
+                for (GeodeCluster g : geodes) {
+                    float sizeScale = Math.min(3.5f, 1.0f + (g.count * 0.15f));
+                    geodeMod.targets.add(new RenderTarget(
+                        g.center,
+                        -sizeScale, -sizeScale, -sizeScale,
+                        1.0f + sizeScale, 1.0f + sizeScale, 1.0f + sizeScale
+                    ));
+                }
+            }
+        }
+    }
+
+    public static class GeodeCluster {
+        public BlockPos center;
+        public int count = 0;
+        private long sumX = 0, sumY = 0, sumZ = 0;
+
+        public GeodeCluster(BlockPos p) {
+            add(p);
+        }
+
+        public void add(BlockPos p) {
+            sumX += p.getX();
+            sumY += p.getY();
+            sumZ += p.getZ();
+            count++;
+            center = new BlockPos((int)(sumX / count), (int)(sumY / count), (int)(sumZ / count));
         }
     }
 
