@@ -15,8 +15,12 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.entity.decoration.ArmorStand;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.*;
+import net.minecraft.world.level.block.piston.PistonMovingBlockEntity;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
@@ -27,57 +31,66 @@ import java.util.ArrayList;
 import java.util.List;
 
 public class ExampleModClient implements ClientModInitializer {
+    public static final Freecam FREECAM = new Freecam();
+
     public static final List<Module> MODULES = List.of(
-        new StorageFinder(),
-        new SpawnerFinder(),
-        new Freecam()
+        new ChestESP(),
+        new BarrelESP(),
+        new EnderChestESP(),
+        new HopperESP(),
+        new ShulkerESP(),
+        new DropperESP(),
+        new PistonESP(),
+        new SpawnerESP(),
+        FREECAM
     );
 
     private boolean f4WasDown = false;
+    private boolean f6WasDown = false;
     private int scanTimer = 0;
 
     @Override
     public void onInitializeClient() {
-        // 1. START_CLIENT_TICK: Intercept input BEFORE player physics & network packets run
+        // 1. START_CLIENT_TICK: Freeze real player before physics & network packets run
         ClientTickEvents.START_CLIENT_TICK.register(client -> {
             if (client.player == null || client.level == null) return;
 
-            for (Module m : MODULES) {
-                if (m instanceof Freecam freecam && freecam.isEnabled()) {
-                    // Release all Minecraft keybindings so the real player never walks, jumps, or sneaks
-                    KeyMapping.releaseAll();
-                    freecam.freezePlayerPreTick(client);
-                }
+            if (FREECAM.isEnabled()) {
+                KeyMapping.releaseAll();
+                FREECAM.freezePlayerPreTick(client);
             }
         });
 
-        // 2. END_CLIENT_TICK: Handle F4 menu, block scanning, and Freecam camera movement
+        // 2. END_CLIENT_TICK: Handle F4 (ClickGUI), F6 (Freecam), Block Scanner & Freecam movement
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             if (client.getWindow() == null) return;
             long window = client.getWindow().handle();
-            boolean f4Down = InputConstants.isKeyDown(client.getWindow(), GLFW.GLFW_KEY_F4);
 
+            // F4 -> Open ClickGUI
+            boolean f4Down = InputConstants.isKeyDown(client.getWindow(), GLFW.GLFW_KEY_F4);
             if (f4Down && !f4WasDown && client.screen == null) {
                 client.setScreen(new ClickGuiScreen(MODULES));
             }
             f4WasDown = f4Down;
 
+            // F6 -> Toggle Freecam directly
+            boolean f6Down = InputConstants.isKeyDown(client.getWindow(), GLFW.GLFW_KEY_F6);
+            if (f6Down && !f6WasDown && client.screen == null) {
+                FREECAM.toggle();
+            }
+            f6WasDown = f6Down;
+
+            // Scan loaded chunks every 12 ticks for enabled ESP modules
             if (client.level != null && client.player != null) {
                 scanTimer++;
-                if (scanTimer >= 10) {
+                if (scanTimer >= 12) {
                     scanTimer = 0;
-                    for (Module m : MODULES) {
-                        if (m.isEnabled()) {
-                            m.onTick(client);
-                        }
-                    }
+                    BlockScanner.scanAllEnabled(client, MODULES);
                 }
             }
 
-            for (Module m : MODULES) {
-                if (m instanceof Freecam freecam && freecam.isEnabled()) {
-                    freecam.updateFreecamPostTick(client, window);
-                }
+            if (FREECAM.isEnabled()) {
+                FREECAM.updateFreecamPostTick(client, window);
             }
         });
 
@@ -86,10 +99,8 @@ public class ExampleModClient implements ClientModInitializer {
             Minecraft mc = Minecraft.getInstance();
             if (mc.level == null || mc.player == null || mc.options.hideGui) return;
 
-            for (Module m : MODULES) {
-                if (m instanceof Freecam freecam && freecam.isEnabled()) {
-                    freecam.syncRotationFrame(mc);
-                }
+            if (FREECAM.isEnabled()) {
+                FREECAM.syncRotationFrame(mc);
             }
 
             if (mc.screen instanceof ClickGuiScreen) return;
@@ -99,7 +110,7 @@ public class ExampleModClient implements ClientModInitializer {
             int sh = mc.getWindow().getGuiScaledHeight();
 
             for (Module mod : MODULES) {
-                if (mod.isEnabled()) {
+                if (mod.isEnabled() && !mod.targets.isEmpty()) {
                     EspRenderer.renderModuleEsp(context, mc, mod, sw, sh, partialTick);
                 }
             }
@@ -115,19 +126,27 @@ public class ExampleModClient implements ClientModInitializer {
         });
     }
 
+    // ==========================================
+    // TARGET DATA HOLDER
+    // ==========================================
     public static class RenderTarget {
         public final BlockPos pos;
         public final float minX, minY, minZ, maxX, maxY, maxZ;
-        public final int customColor;
 
-        public RenderTarget(BlockPos pos, float minX, float minY, float minZ, float maxX, float maxY, float maxZ, int customColor) {
+        public RenderTarget(BlockPos pos, float minX, float minY, float minZ, float maxX, float maxY, float maxZ) {
             this.pos = pos;
             this.minX = minX; this.minY = minY; this.minZ = minZ;
             this.maxX = maxX; this.maxY = maxY; this.maxZ = maxZ;
-            this.customColor = customColor;
+        }
+
+        public RenderTarget(BlockPos pos) {
+            this(pos, 0f, 0f, 0f, 1f, 1f, 1f);
         }
     }
 
+    // ==========================================
+    // SETTINGS SYSTEM
+    // ==========================================
     public static abstract class Setting<T> {
         private final String name;
         protected T value;
@@ -169,6 +188,9 @@ public class ExampleModClient implements ClientModInitializer {
         public double getMax() { return max; }
     }
 
+    // ==========================================
+    // INDIVIDUAL MODULES
+    // ==========================================
     public static abstract class Module {
         private final String name;
         private boolean enabled = false;
@@ -184,18 +206,23 @@ public class ExampleModClient implements ClientModInitializer {
         public final NumberSetting fillAlpha = new NumberSetting("Fill Opacity", 65, 0, 255, 1);
         public final BooleanSetting tracers = new BooleanSetting("Tracers", false);
 
-        public Module(String name, double r, double g, double b) {
+        public Module(String name, double r, double g, double b, boolean includeRenderSettings) {
             this.name = name;
             this.red = new NumberSetting("Red", r, 0, 255, 1);
             this.green = new NumberSetting("Green", g, 0, 255, 1);
             this.blue = new NumberSetting("Blue", b, 0, 255, 1);
+            if (includeRenderSettings) {
+                settings.addAll(List.of(mode, tracers, red, green, blue, outlineAlpha, fillAlpha));
+            }
         }
 
         public void toggle() {
             this.enabled = !this.enabled;
             Minecraft mc = Minecraft.getInstance();
-            if (this.enabled && mc.level != null) {
-                onTick(mc);
+            if (!this.enabled) {
+                targets.clear();
+            } else if (mc.level != null && mc.player != null) {
+                BlockScanner.scanAllEnabled(mc, MODULES);
             }
             if (mc.player != null) {
                 mc.player.displayClientMessage(
@@ -204,71 +231,166 @@ public class ExampleModClient implements ClientModInitializer {
                 );
             }
         }
+
         public boolean isEnabled() { return enabled; }
         public boolean isExpanded() { return expanded; }
         public void setExpanded(boolean expanded) { this.expanded = expanded; }
         public String getName() { return name; }
         public List<Setting<?>> getSettings() { return settings; }
-        public abstract void onTick(Minecraft mc);
     }
 
-    public static class StorageFinder extends Module {
-        public final BooleanSetting chests = new BooleanSetting("Chests & Barrels", true);
-        public final BooleanSetting enderChests = new BooleanSetting("EnderChests", true);
-        public final BooleanSetting hoppers = new BooleanSetting("Hoppers", true);
-        public final BooleanSetting shulkers = new BooleanSetting("Shulkers", true);
-        public final BooleanSetting droppers = new BooleanSetting("Droppers & Dispensers", true);
+    public static class ChestESP extends Module {
+        public ChestESP() { super("Chests", 255, 185, 35, true); }
+    }
 
-        public StorageFinder() {
-            super("StorageFinder", 255, 180, 40);
-            settings.addAll(List.of(
-                mode, chests, enderChests, hoppers, shulkers, droppers,
-                tracers, red, green, blue, outlineAlpha, fillAlpha
-            ));
-        }
+    public static class BarrelESP extends Module {
+        public BarrelESP() { super("Barrels", 215, 130, 60, true); }
+    }
 
-        @Override
-        public void onTick(Minecraft mc) {
-            targets.clear();
-            for (BlockEntity be : getLoadedBlockEntities(mc)) {
-                BlockPos p = be.getBlockPos();
+    public static class EnderChestESP extends Module {
+        public EnderChestESP() { super("EnderChests", 170, 0, 255, true); }
+    }
 
-                if (chests.getValue() && be instanceof ChestBlockEntity) {
-                    targets.add(new RenderTarget(p, 0.0625f, 0.0f, 0.0625f, 0.9375f, 0.875f, 0.9375f, -1));
-                } else if (chests.getValue() && be instanceof BarrelBlockEntity) {
-                    targets.add(new RenderTarget(p, 0f, 0f, 0f, 1f, 1f, 1f, -1));
-                } else if (enderChests.getValue() && be instanceof EnderChestBlockEntity) {
-                    targets.add(new RenderTarget(p, 0.0625f, 0.0f, 0.0625f, 0.9375f, 0.875f, 0.9375f, 0xAA00FF));
-                } else if (hoppers.getValue() && be instanceof HopperBlockEntity) {
-                    targets.add(new RenderTarget(p, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 0x55FFFF));
-                } else if (shulkers.getValue() && be instanceof ShulkerBoxBlockEntity) {
-                    targets.add(new RenderTarget(p, 0f, 0f, 0f, 1f, 1f, 1f, 0xFF55FF));
-                } else if (droppers.getValue() && (be instanceof DropperBlockEntity || be instanceof DispenserBlockEntity)) {
-                    targets.add(new RenderTarget(p, 0f, 0f, 0f, 1f, 1f, 1f, -1));
+    public static class HopperESP extends Module {
+        public HopperESP() { super("Hoppers", 85, 255, 255, true); }
+    }
+
+    public static class ShulkerESP extends Module {
+        public ShulkerESP() { super("Shulkers", 255, 85, 255, true); }
+    }
+
+    public static class DropperESP extends Module {
+        public DropperESP() { super("Droppers", 150, 180, 255, true); }
+    }
+
+    public static class PistonESP extends Module {
+        public PistonESP() { super("Pistons", 100, 255, 85, true); }
+    }
+
+    public static class SpawnerESP extends Module {
+        public SpawnerESP() { super("Spawners", 255, 50, 120, true); }
+    }
+
+    // ==========================================
+    // UNIFIED CHUNK & PISTON SCANNER
+    // ==========================================
+    public static class BlockScanner {
+        private static Method minYMethod = null;
+        private static boolean minYChecked = false;
+
+        private static int getChunkMinY(LevelChunk chunk) {
+            if (!minYChecked) {
+                minYChecked = true;
+                for (String name : List.of("getMinY", "getMinBuildHeight")) {
+                    try {
+                        minYMethod = chunk.getClass().getMethod(name);
+                        break;
+                    } catch (Exception ignored) {}
                 }
             }
+            if (minYMethod != null) {
+                try {
+                    Object res = minYMethod.invoke(chunk);
+                    if (res instanceof Number n) return n.intValue();
+                } catch (Exception ignored) {}
+            }
+            return -64;
         }
-    }
 
-    public static class SpawnerFinder extends Module {
-        public SpawnerFinder() {
-            super("SpawnerFinder", 255, 50, 255);
-            settings.addAll(List.of(mode, tracers, red, green, blue, outlineAlpha, fillAlpha));
-        }
+        public static void scanAllEnabled(Minecraft mc, List<Module> modules) {
+            if (mc.level == null || mc.player == null) return;
 
-        @Override
-        public void onTick(Minecraft mc) {
-            targets.clear();
-            for (BlockEntity be : getLoadedBlockEntities(mc)) {
-                if (be instanceof SpawnerBlockEntity) {
-                    targets.add(new RenderTarget(be.getBlockPos(), 0f, 0f, 0f, 1f, 1f, 1f, -1));
+            ChestESP chestMod = null;
+            BarrelESP barrelMod = null;
+            EnderChestESP enderMod = null;
+            HopperESP hopperMod = null;
+            ShulkerESP shulkerMod = null;
+            DropperESP dropperMod = null;
+            PistonESP pistonMod = null;
+            SpawnerESP spawnerMod = null;
+
+            boolean anyEnabled = false;
+            for (Module m : modules) {
+                m.targets.clear();
+                if (!m.isEnabled()) continue;
+                if (m instanceof ChestESP c) { chestMod = c; anyEnabled = true; }
+                else if (m instanceof BarrelESP b) { barrelMod = b; anyEnabled = true; }
+                else if (m instanceof EnderChestESP e) { enderMod = e; anyEnabled = true; }
+                else if (m instanceof HopperESP h) { hopperMod = h; anyEnabled = true; }
+                else if (m instanceof ShulkerESP s) { shulkerMod = s; anyEnabled = true; }
+                else if (m instanceof DropperESP d) { dropperMod = d; anyEnabled = true; }
+                else if (m instanceof PistonESP p) { pistonMod = p; anyEnabled = true; }
+                else if (m instanceof SpawnerESP sp) { spawnerMod = sp; anyEnabled = true; }
+            }
+
+            if (!anyEnabled) return;
+
+            int renderDistance = mc.options.getEffectiveRenderDistance();
+            ChunkPos playerChunk = mc.player.chunkPosition();
+
+            for (int cx = -renderDistance; cx <= renderDistance; cx++) {
+                for (int cz = -renderDistance; cz <= renderDistance; cz++) {
+                    LevelChunk chunk = mc.level.getChunkSource().getChunk(playerChunk.x + cx, playerChunk.z + cz, false);
+                    if (chunk == null) continue;
+
+                    // 1. Scan BlockEntities (Chests, Barrels, EnderChests, Hoppers, Shulkers, Droppers, Spawners)
+                    for (BlockEntity be : chunk.getBlockEntities().values()) {
+                        BlockPos p = be.getBlockPos();
+                        if (chestMod != null && be instanceof ChestBlockEntity) {
+                            chestMod.targets.add(new RenderTarget(p, 0.0625f, 0.0f, 0.0625f, 0.9375f, 0.875f, 0.9375f));
+                        } else if (barrelMod != null && be instanceof BarrelBlockEntity) {
+                            barrelMod.targets.add(new RenderTarget(p));
+                        } else if (enderMod != null && be instanceof EnderChestBlockEntity) {
+                            enderMod.targets.add(new RenderTarget(p, 0.0625f, 0.0f, 0.0625f, 0.9375f, 0.875f, 0.9375f));
+                        } else if (hopperMod != null && be instanceof HopperBlockEntity) {
+                            hopperMod.targets.add(new RenderTarget(p));
+                        } else if (shulkerMod != null && be instanceof ShulkerBoxBlockEntity) {
+                            shulkerMod.targets.add(new RenderTarget(p));
+                        } else if (dropperMod != null && (be instanceof DropperBlockEntity || be instanceof DispenserBlockEntity)) {
+                            dropperMod.targets.add(new RenderTarget(p));
+                        } else if (spawnerMod != null && be instanceof SpawnerBlockEntity) {
+                            spawnerMod.targets.add(new RenderTarget(p));
+                        } else if (pistonMod != null && be instanceof PistonMovingBlockEntity) {
+                            pistonMod.targets.add(new RenderTarget(p));
+                        }
+                    }
+
+                    // 2. Fast Chunk Section Palette Scan for Stationary Pistons & Sticky Pistons
+                    if (pistonMod != null && pistonMod.targets.size() < 600) {
+                        LevelChunkSection[] sections = chunk.getSections();
+                        int minY = getChunkMinY(chunk);
+                        int baseX = chunk.getPos().getMinBlockX();
+                        int baseZ = chunk.getPos().getMinBlockZ();
+
+                        for (int sIdx = 0; sIdx < sections.length; sIdx++) {
+                            LevelChunkSection section = sections[sIdx];
+                            if (section == null || section.hasOnlyAir()) continue;
+
+                            // Skip entire 16x16x16 section instantly if palette has no pistons
+                            if (!section.maybeHas(state -> state.is(Blocks.PISTON) || state.is(Blocks.STICKY_PISTON))) {
+                                continue;
+                            }
+
+                            int sectionBaseY = minY + (sIdx << 4);
+                            for (int y = 0; y < 16; y++) {
+                                for (int z = 0; z < 16; z++) {
+                                    for (int x = 0; x < 16; x++) {
+                                        BlockState state = section.getBlockState(x, y, z);
+                                        if (state.is(Blocks.PISTON) || state.is(Blocks.STICKY_PISTON)) {
+                                            pistonMod.targets.add(new RenderTarget(new BlockPos(baseX + x, sectionBaseY + y, baseZ + z)));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 
     // ==========================================
-    // PACKET-SAFE FREECAM MODULE
+    // PACKET-SAFE FREECAM MODULE [F6]
     // ==========================================
     public static class Freecam extends Module {
         public final NumberSetting speed = new NumberSetting("Speed", 1.0, 0.1, 5.0, 0.1);
@@ -282,8 +404,8 @@ public class ExampleModClient implements ClientModInitializer {
         public static boolean isFreecamActive = false;
 
         public Freecam() {
-            super("Freecam", 50, 200, 255);
-            settings.addAll(List.of(speed));
+            super("Freecam [F6]", 50, 200, 255, false);
+            settings.add(speed);
         }
 
         @Override
@@ -310,6 +432,7 @@ public class ExampleModClient implements ClientModInitializer {
                 camPitch = savedPitch;
 
                 KeyMapping.releaseAll();
+                mc.smartCull = false;
 
                 cameraDummy = new ArmorStand(mc.level, camX, camY, camZ);
                 cameraDummy.setInvisible(true);
@@ -319,6 +442,7 @@ public class ExampleModClient implements ClientModInitializer {
 
                 mc.setCameraEntity(cameraDummy);
             } else {
+                mc.smartCull = true;
                 mc.setCameraEntity(mc.player);
                 cameraDummy = null;
                 mc.player.setPos(savedX, savedY, savedZ);
@@ -328,11 +452,10 @@ public class ExampleModClient implements ClientModInitializer {
             }
         }
 
-        // Called BEFORE player tick so the real player never moves or sends look/move packets
         public void freezePlayerPreTick(Minecraft mc) {
             if (mc.player == null) return;
+            mc.smartCull = false;
 
-            // Capture any mouse movement applied to player and transfer it to Freecam
             float deltaYaw = mc.player.getYRot() - savedYaw;
             float deltaPitch = mc.player.getXRot() - savedPitch;
             if (deltaYaw != 0 || deltaPitch != 0) {
@@ -340,7 +463,6 @@ public class ExampleModClient implements ClientModInitializer {
                 camPitch = Math.max(-90.0f, Math.min(90.0f, camPitch + deltaPitch));
             }
 
-            // Lock real player rotation and position before network tick runs
             mc.player.setYRot(savedYaw);
             mc.player.yRotO = savedYaw;
             mc.player.setYHeadRot(savedYaw);
@@ -356,12 +478,13 @@ public class ExampleModClient implements ClientModInitializer {
             mc.player.setSprinting(false);
         }
 
-        // Called AFTER tick to move only the detached camera entity
         public void updateFreecamPostTick(Minecraft mc, long window) {
             if (mc.player == null || mc.level == null) {
                 isFreecamActive = false;
                 return;
             }
+
+            mc.smartCull = false;
 
             if (cameraDummy == null) {
                 cameraDummy = new ArmorStand(mc.level, camX, camY, camZ);
@@ -374,7 +497,6 @@ public class ExampleModClient implements ClientModInitializer {
                 mc.setCameraEntity(cameraDummy);
             }
 
-            // Ensure real player stays strictly at saved coordinates
             mc.player.setPos(savedX, savedY, savedZ);
             mc.player.setDeltaMovement(0, 0, 0);
 
@@ -435,28 +557,11 @@ public class ExampleModClient implements ClientModInitializer {
             cameraDummy.setXRot(camPitch);
             cameraDummy.xRotO = camPitch;
         }
-
-        @Override
-        public void onTick(Minecraft mc) {}
     }
 
-    public static List<BlockEntity> getLoadedBlockEntities(Minecraft mc) {
-        List<BlockEntity> list = new ArrayList<>();
-        if (mc.level == null || mc.player == null) return list;
-        int renderDistance = mc.options.getEffectiveRenderDistance();
-        ChunkPos playerChunk = mc.player.chunkPosition();
-
-        for (int x = -renderDistance; x <= renderDistance; x++) {
-            for (int z = -renderDistance; z <= renderDistance; z++) {
-                LevelChunk chunk = mc.level.getChunkSource().getChunk(playerChunk.x + x, playerChunk.z + z, false);
-                if (chunk != null) {
-                    list.addAll(chunk.getBlockEntities().values());
-                }
-            }
-        }
-        return list;
-    }
-
+    // ==========================================
+    // 3D PROJECTION ENGINE
+    // ==========================================
     public static class EspRenderer {
         private static final int[][] EDGES = {
             {0,1}, {1,3}, {3,2}, {2,0},
@@ -533,21 +638,18 @@ public class ExampleModClient implements ClientModInitializer {
             float cosPitch = (float) Math.cos(pitch);
             float sinPitch = (float) Math.sin(pitch);
 
-            int baseR = mod.red.getValue().intValue();
-            int baseG = mod.green.getValue().intValue();
-            int baseB = mod.blue.getValue().intValue();
+            int r = mod.red.getValue().intValue();
+            int g = mod.green.getValue().intValue();
+            int b = mod.blue.getValue().intValue();
             int oA = mod.outlineAlpha.getValue().intValue();
             int fA = mod.fillAlpha.getValue().intValue();
             String renderMode = mod.mode.getValue();
 
+            int outlineColor = ((oA & 0xFF) << 24) | ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF);
+            int fillColor = ((fA & 0xFF) << 24) | ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF);
+
             for (RenderTarget target : mod.targets) {
                 BlockPos pos = target.pos;
-                int r = target.customColor != -1 ? ((target.customColor >> 16) & 0xFF) : baseR;
-                int g = target.customColor != -1 ? ((target.customColor >> 8) & 0xFF) : baseG;
-                int b = target.customColor != -1 ? (target.customColor & 0xFF) : baseB;
-
-                int outlineColor = ((oA & 0xFF) << 24) | ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF);
-                int fillColor = ((fA & 0xFF) << 24) | ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF);
 
                 float[] sx = new float[8];
                 float[] sy = new float[8];
@@ -657,10 +759,13 @@ public class ExampleModClient implements ClientModInitializer {
         }
     }
 
+    // ==========================================
+    // CLICKGUI SCREEN (With Individual Block Buttons)
+    // ==========================================
     public static class ClickGuiScreen extends Screen {
         private final List<Module> modules;
         private NumberSetting draggingSlider = null;
-        private final int panelX = 40, panelY = 40, panelWidth = 195;
+        private final int panelX = 35, panelY = 30, panelWidth = 195;
         private boolean leftWasDown = false;
         private boolean rightWasDown = false;
 
@@ -693,14 +798,14 @@ public class ExampleModClient implements ClientModInitializer {
             rightWasDown = rightDown;
 
             for (Module mod : modules) {
-                if (mod.isEnabled()) {
+                if (mod.isEnabled() && !mod.targets.isEmpty()) {
                     EspRenderer.renderModuleEsp(context, mc, mod, this.width, this.height, delta);
                 }
             }
 
             context.fill(panelX, panelY - 2, panelX + panelWidth, panelY, 0xFF8A2BE2);
             context.fill(panelX, panelY, panelX + panelWidth, panelY + 20, 0xF014141D);
-            context.drawString(this.font, "✦ RENDER MODULES", panelX + 8, panelY + 6, 0xFFFFFFFF, true);
+            context.drawString(this.font, "✦ BLOCK ESP & CLIENT", panelX + 8, panelY + 6, 0xFFFFFFFF, true);
 
             int currentY = panelY + 20;
             for (Module mod : modules) {
@@ -709,10 +814,14 @@ public class ExampleModClient implements ClientModInitializer {
                 context.fill(panelX, currentY, panelX + panelWidth, currentY + 18, bgColor);
 
                 if (mod.isEnabled()) {
-                    context.fill(panelX, currentY, panelX + 3, currentY + 18, 0xFF8A2BE2);
+                    int sideBarColor = (0xFF << 24)
+                        | ((mod.red.getValue().intValue() & 0xFF) << 16)
+                        | ((mod.green.getValue().intValue() & 0xFF) << 8)
+                        | (mod.blue.getValue().intValue() & 0xFF);
+                    context.fill(panelX, currentY, panelX + 3, currentY + 18, sideBarColor);
                 }
 
-                String label = mod.getName() + (mod.isEnabled() && !mod.targets.isEmpty() ? " [" + mod.targets.size() + "]" : "");
+                String label = mod.getName() + (mod.isEnabled() && !(mod instanceof Freecam) ? " [" + mod.targets.size() + "]" : "");
                 context.drawString(this.font, label, panelX + 8, currentY + 5, mod.isEnabled() ? 0xFFD8B4FE : 0xFFAAAAAA, true);
                 context.drawString(this.font, mod.isExpanded() ? "▾" : "▸", panelX + panelWidth - 12, currentY + 5, 0xFF888888, true);
                 currentY += 18;
@@ -737,7 +846,10 @@ public class ExampleModClient implements ClientModInitializer {
 
                             context.fill(panelX + 10, currentY + 12, panelX + panelWidth - 10, currentY + 14, 0xFF252530);
                             context.fill(panelX + 10, currentY + 12, panelX + 10 + barWidth, currentY + 14, 0xFF8A2BE2);
-                            context.drawString(this.font, numSet.getName() + ": " + numSet.getValue().intValue(), panelX + 12, currentY + 2, 0xFFCCCCCC, true);
+                            String valStr = numSet.step < 1.0
+                                ? String.format("%.1f", numSet.getValue())
+                                : String.valueOf(numSet.getValue().intValue());
+                            context.drawString(this.font, numSet.getName() + ": " + valStr, panelX + 12, currentY + 2, 0xFFCCCCCC, true);
                         }
                         currentY += 16;
                     }
