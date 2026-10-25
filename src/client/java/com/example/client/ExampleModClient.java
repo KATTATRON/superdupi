@@ -42,6 +42,7 @@ public class ExampleModClient implements ClientModInitializer {
         new DropperESP(),
         new PistonESP(),
         new SpawnerESP(),
+        new AmethystGeodeESP(),
         FREECAM
     );
 
@@ -51,7 +52,6 @@ public class ExampleModClient implements ClientModInitializer {
 
     @Override
     public void onInitializeClient() {
-        // 1. START_CLIENT_TICK: Freeze real player before physics & network packets run
         ClientTickEvents.START_CLIENT_TICK.register(client -> {
             if (client.player == null || client.level == null) return;
 
@@ -61,26 +61,23 @@ public class ExampleModClient implements ClientModInitializer {
             }
         });
 
-        // 2. END_CLIENT_TICK: Handle F4 (ClickGUI), F6 (Freecam), Block Scanner & Freecam movement
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             if (client.getWindow() == null) return;
             long window = client.getWindow().handle();
 
-            // F4 -> Open ClickGUI
             boolean f4Down = InputConstants.isKeyDown(client.getWindow(), GLFW.GLFW_KEY_F4);
             if (f4Down && !f4WasDown && client.screen == null) {
                 client.setScreen(new ClickGuiScreen(MODULES));
             }
             f4WasDown = f4Down;
 
-            // F6 -> Toggle Freecam directly
-            boolean f6Down = InputConstants.isKeyDown(client.getWindow(), GLFW.GLFW_KEY_F6);
-            if (f6Down && !f6WasDown && client.screen == null) {
+            // Fixed F6 Freecam Keybind (Direct GLFW Window state check)
+            boolean f6Pressed = GLFW.glfwGetKey(window, GLFW.GLFW_KEY_F6) == GLFW.GLFW_PRESS;
+            if (f6Pressed && !f6WasDown && client.screen == null) {
                 FREECAM.toggle();
             }
-            f6WasDown = f6Down;
+            f6WasDown = f6Pressed;
 
-            // Scan loaded chunks every 12 ticks for enabled ESP modules
             if (client.level != null && client.player != null) {
                 scanTimer++;
                 if (scanTimer >= 12) {
@@ -94,7 +91,6 @@ public class ExampleModClient implements ClientModInitializer {
             }
         });
 
-        // 3. HUD Render: Smooth per-frame Freecam look + 3D ESP
         HudRenderCallback.EVENT.register((context, tickCounter) -> {
             Minecraft mc = Minecraft.getInstance();
             if (mc.level == null || mc.player == null || mc.options.hideGui) return;
@@ -126,9 +122,6 @@ public class ExampleModClient implements ClientModInitializer {
         });
     }
 
-    // ==========================================
-    // TARGET DATA HOLDER
-    // ==========================================
     public static class RenderTarget {
         public final BlockPos pos;
         public final float minX, minY, minZ, maxX, maxY, maxZ;
@@ -144,9 +137,6 @@ public class ExampleModClient implements ClientModInitializer {
         }
     }
 
-    // ==========================================
-    // SETTINGS SYSTEM
-    // ==========================================
     public static abstract class Setting<T> {
         private final String name;
         protected T value;
@@ -188,9 +178,6 @@ public class ExampleModClient implements ClientModInitializer {
         public double getMax() { return max; }
     }
 
-    // ==========================================
-    // INDIVIDUAL MODULES
-    // ==========================================
     public static abstract class Module {
         private final String name;
         private boolean enabled = false;
@@ -271,9 +258,11 @@ public class ExampleModClient implements ClientModInitializer {
         public SpawnerESP() { super("Spawners", 255, 50, 120, true); }
     }
 
-    // ==========================================
-    // UNIFIED CHUNK & PISTON SCANNER
-    // ==========================================
+    // Amethyst Geode ESP: Box scales larger depending on how full-grown the amethyst clusters are!
+    public static class AmethystGeodeESP extends Module {
+        public AmethystGeodeESP() { super("Amethyst Geode", 180, 85, 255, true); }
+    }
+
     public static class BlockScanner {
         private static Method minYMethod = null;
         private static boolean minYChecked = false;
@@ -308,6 +297,7 @@ public class ExampleModClient implements ClientModInitializer {
             DropperESP dropperMod = null;
             PistonESP pistonMod = null;
             SpawnerESP spawnerMod = null;
+            AmethystGeodeESP geodeMod = null;
 
             boolean anyEnabled = false;
             for (Module m : modules) {
@@ -321,6 +311,7 @@ public class ExampleModClient implements ClientModInitializer {
                 else if (m instanceof DropperESP d) { dropperMod = d; anyEnabled = true; }
                 else if (m instanceof PistonESP p) { pistonMod = p; anyEnabled = true; }
                 else if (m instanceof SpawnerESP sp) { spawnerMod = sp; anyEnabled = true; }
+                else if (m instanceof AmethystGeodeESP g) { geodeMod = g; anyEnabled = true; }
             }
 
             if (!anyEnabled) return;
@@ -333,7 +324,6 @@ public class ExampleModClient implements ClientModInitializer {
                     LevelChunk chunk = mc.level.getChunkSource().getChunk(playerChunk.x + cx, playerChunk.z + cz, false);
                     if (chunk == null) continue;
 
-                    // 1. Scan BlockEntities (Chests, Barrels, EnderChests, Hoppers, Shulkers, Droppers, Spawners)
                     for (BlockEntity be : chunk.getBlockEntities().values()) {
                         BlockPos p = be.getBlockPos();
                         if (chestMod != null && be instanceof ChestBlockEntity) {
@@ -355,8 +345,7 @@ public class ExampleModClient implements ClientModInitializer {
                         }
                     }
 
-                    // 2. Fast Chunk Section Palette Scan for Stationary Pistons & Sticky Pistons
-                    if (pistonMod != null && pistonMod.targets.size() < 600) {
+                    if ((pistonMod != null && pistonMod.targets.size() < 600) || (geodeMod != null && geodeMod.targets.size() < 200)) {
                         LevelChunkSection[] sections = chunk.getSections();
                         int minY = getChunkMinY(chunk);
                         int baseX = chunk.getPos().getMinBlockX();
@@ -366,18 +355,39 @@ public class ExampleModClient implements ClientModInitializer {
                             LevelChunkSection section = sections[sIdx];
                             if (section == null || section.hasOnlyAir()) continue;
 
-                            // Skip entire 16x16x16 section instantly if palette has no pistons
-                            if (!section.maybeHas(state -> state.is(Blocks.PISTON) || state.is(Blocks.STICKY_PISTON))) {
-                                continue;
+                            boolean wantPistons = pistonMod != null && pistonMod.targets.size() < 600;
+                            boolean wantGeodes = geodeMod != null && geodeMod.targets.size() < 200;
+
+                            if (wantPistons && section.maybeHas(state -> state.is(Blocks.PISTON) || state.is(Blocks.STICKY_PISTON))) {
+                                int sectionBaseY = minY + (sIdx << 4);
+                                for (int y = 0; y < 16; y++) {
+                                    for (int z = 0; z < 16; z++) {
+                                        for (int x = 0; x < 16; x++) {
+                                            BlockState state = section.getBlockState(x, y, z);
+                                            if (state.is(Blocks.PISTON) || state.is(Blocks.STICKY_PISTON)) {
+                                                pistonMod.targets.add(new RenderTarget(new BlockPos(baseX + x, sectionBaseY + y, baseZ + z)));
+                                            }
+                                        }
+                                    }
+                                }
                             }
 
-                            int sectionBaseY = minY + (sIdx << 4);
-                            for (int y = 0; y < 16; y++) {
-                                for (int z = 0; z < 16; z++) {
-                                    for (int x = 0; x < 16; x++) {
-                                        BlockState state = section.getBlockState(x, y, z);
-                                        if (state.is(Blocks.PISTON) || state.is(Blocks.STICKY_PISTON)) {
-                                            pistonMod.targets.add(new RenderTarget(new BlockPos(baseX + x, sectionBaseY + y, baseZ + z)));
+                            if (wantGeodes && section.maybeHas(state -> state.is(Blocks.BUDDING_AMETHYST) || state.is(Blocks.LARGE_AMETHYST_BUD) || state.is(Blocks.MEDIUM_AMETHYST_BUD) || state.is(Blocks.SMALL_AMETHYST_BUD) || state.is(Blocks.AMETHYST_CLUSTER))) {
+                                int sectionBaseY = minY + (sIdx << 4);
+                                for (int y = 0; y < 16; y++) {
+                                    for (int z = 0; z < 16; z++) {
+                                        for (int x = 0; x < 16; x++) {
+                                            BlockState state = section.getBlockState(x, y, z);
+                                            // Scale bounding box larger based on amethyst growth stage!
+                                            if (state.is(Blocks.AMETHYST_CLUSTER)) {
+                                                geodeMod.targets.add(new RenderTarget(new BlockPos(baseX + x, sectionBaseY + y, baseZ + z), -0.4f, -0.4f, -0.4f, 1.4f, 1.4f, 1.4f));
+                                            } else if (state.is(Blocks.LARGE_AMETHYST_BUD)) {
+                                                geodeMod.targets.add(new RenderTarget(new BlockPos(baseX + x, sectionBaseY + y, baseZ + z), -0.25f, -0.25f, -0.25f, 1.25f, 1.25f, 1.25f));
+                                            } else if (state.is(Blocks.MEDIUM_AMETHYST_BUD)) {
+                                                geodeMod.targets.add(new RenderTarget(new BlockPos(baseX + x, sectionBaseY + y, baseZ + z), -0.1f, -0.1f, -0.1f, 1.1f, 1.1f, 1.1f));
+                                            } else if (state.is(Blocks.SMALL_AMETHYST_BUD) || state.is(Blocks.BUDDING_AMETHYST)) {
+                                                geodeMod.targets.add(new RenderTarget(new BlockPos(baseX + x, sectionBaseY + y, baseZ + z)));
+                                            }
                                         }
                                     }
                                 }
@@ -389,9 +399,6 @@ public class ExampleModClient implements ClientModInitializer {
         }
     }
 
-    // ==========================================
-    // PACKET-SAFE FREECAM MODULE [F6]
-    // ==========================================
     public static class Freecam extends Module {
         public final NumberSetting speed = new NumberSetting("Speed", 1.0, 0.1, 5.0, 0.1);
 
@@ -559,9 +566,6 @@ public class ExampleModClient implements ClientModInitializer {
         }
     }
 
-    // ==========================================
-    // 3D PROJECTION ENGINE
-    // ==========================================
     public static class EspRenderer {
         private static final int[][] EDGES = {
             {0,1}, {1,3}, {3,2}, {2,0},
@@ -759,9 +763,6 @@ public class ExampleModClient implements ClientModInitializer {
         }
     }
 
-    // ==========================================
-    // CLICKGUI SCREEN (With Individual Block Buttons)
-    // ==========================================
     public static class ClickGuiScreen extends Screen {
         private final List<Module> modules;
         private NumberSetting draggingSlider = null;
