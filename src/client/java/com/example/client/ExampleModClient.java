@@ -12,6 +12,7 @@ import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
+import net.minecraft.world.entity.decoration.ArmorStand;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.entity.*;
 import net.minecraft.world.level.chunk.LevelChunk;
@@ -58,41 +59,25 @@ public class ExampleModClient implements ClientModInitializer {
                 }
             }
 
-            // Freecam Bewegungslogik (stabil über GLFW)
-            Freecam freecamMod = null;
+            // Freecam Tick Update
             for (Module m : MODULES) {
-                if (m instanceof Freecam f) {
-                    freecamMod = f;
-                    break;
+                if (m instanceof Freecam freecam && freecam.isEnabled()) {
+                    freecam.updateFreecam(client, window);
                 }
-            }
-
-            if (freecamMod != null && freecamMod.isEnabled() && client.player != null) {
-                client.player.setDeltaMovement(0, 0, 0);
-                double spd = freecamMod.speed.getValue();
-                double rad = Math.toRadians(client.player.getYRot());
-                double forward = 0, strafe = 0;
-
-                if (GLFW.glfwGetKey(window, GLFW.GLFW_KEY_W) == GLFW.GLFW_PRESS) forward += 1;
-                if (GLFW.glfwGetKey(window, GLFW.GLFW_KEY_S) == GLFW.GLFW_PRESS) forward -= 1;
-                if (GLFW.glfwGetKey(window, GLFW.GLFW_KEY_A) == GLFW.GLFW_PRESS) strafe += 1;
-                if (GLFW.glfwGetKey(window, GLFW.GLFW_KEY_D) == GLFW.GLFW_PRESS) strafe -= 1;
-
-                if (forward != 0 || strafe != 0) {
-                    double cos = Math.cos(rad);
-                    double sin = Math.sin(rad);
-                    Freecam.camX += (forward * cos - strafe * sin) * spd;
-                    Freecam.camZ += (forward * sin + strafe * cos) * spd;
-                }
-
-                if (GLFW.glfwGetKey(window, GLFW.GLFW_KEY_SPACE) == GLFW.GLFW_PRESS) Freecam.camY += spd;
-                if (GLFW.glfwGetKey(window, GLFW.GLFW_KEY_LEFT_SHIFT) == GLFW.GLFW_PRESS) Freecam.camY -= spd;
             }
         });
 
         HudRenderCallback.EVENT.register((context, tickCounter) -> {
             Minecraft mc = Minecraft.getInstance();
             if (mc.level == null || mc.player == null || mc.options.hideGui) return;
+
+            // Keep Freecam rotation smooth at full FPS (not just 20 ticks/sec)
+            for (Module m : MODULES) {
+                if (m instanceof Freecam freecam && freecam.isEnabled()) {
+                    freecam.syncRotationFrame(mc);
+                }
+            }
+
             if (mc.screen instanceof ClickGuiScreen) return;
 
             float partialTick = tickCounter.getGameTimeDeltaPartialTick(false);
@@ -268,11 +253,14 @@ public class ExampleModClient implements ClientModInitializer {
         }
     }
 
+    // ==========================================
+    // WORKING FREECAM MODULE (With Camera Entity)
+    // ==========================================
     public static class Freecam extends Module {
         public final NumberSetting speed = new NumberSetting("Speed", 1.0, 0.1, 5.0, 0.1);
 
         private double savedX, savedY, savedZ;
-        private float savedYaw, savedPitch;
+        private ArmorStand cameraDummy = null;
 
         public static double camX, camY, camZ;
         public static boolean isFreecamActive = false;
@@ -286,24 +274,108 @@ public class ExampleModClient implements ClientModInitializer {
         public void toggle() {
             super.toggle();
             Minecraft mc = Minecraft.getInstance();
-            if (mc.player == null) return;
+            if (mc.player == null || mc.level == null) {
+                isFreecamActive = false;
+                return;
+            }
 
             isFreecamActive = isEnabled();
             if (isFreecamActive) {
                 savedX = mc.player.getX();
                 savedY = mc.player.getY();
                 savedZ = mc.player.getZ();
-                savedYaw = mc.player.getYRot();
-                savedPitch = mc.player.getXRot();
 
                 camX = savedX;
-                camY = savedY + mc.player.getEyeHeight();
+                camY = savedY;
                 camZ = savedZ;
+
+                // Create detached camera entity and bind Minecraft's viewport to it
+                cameraDummy = new ArmorStand(mc.level, camX, camY, camZ);
+                cameraDummy.setInvisible(true);
+                cameraDummy.setNoGravity(true);
+                cameraDummy.noPhysics = true;
+                syncRotationFrame(mc);
+
+                mc.setCameraEntity(cameraDummy);
             } else {
+                // Restore camera back to real player
+                mc.setCameraEntity(mc.player);
+                cameraDummy = null;
                 mc.player.setPos(savedX, savedY, savedZ);
-                mc.player.setYRot(savedYaw);
-                mc.player.setXRot(savedPitch);
+                mc.player.setDeltaMovement(0, 0, 0);
             }
+        }
+
+        public void updateFreecam(Minecraft mc, long window) {
+            if (mc.player == null || mc.level == null) {
+                isFreecamActive = false;
+                return;
+            }
+
+            if (cameraDummy == null) {
+                cameraDummy = new ArmorStand(mc.level, camX, camY, camZ);
+                cameraDummy.setInvisible(true);
+                cameraDummy.setNoGravity(true);
+                cameraDummy.noPhysics = true;
+            }
+
+            if (mc.getCameraEntity() != cameraDummy) {
+                mc.setCameraEntity(cameraDummy);
+            }
+
+            // Lock real player body at starting coordinates so WASD doesn't walk your character
+            mc.player.setPos(savedX, savedY, savedZ);
+            mc.player.xo = savedX;
+            mc.player.yo = savedY;
+            mc.player.zo = savedZ;
+            mc.player.setDeltaMovement(0, 0, 0);
+
+            // Only move Freecam when no GUI/Chat screen is open
+            double forward = 0, strafe = 0, vertical = 0;
+            if (mc.screen == null) {
+                if (GLFW.glfwGetKey(window, GLFW.GLFW_KEY_W) == GLFW.GLFW_PRESS) forward += 1;
+                if (GLFW.glfwGetKey(window, GLFW.GLFW_KEY_S) == GLFW.GLFW_PRESS) forward -= 1;
+                if (GLFW.glfwGetKey(window, GLFW.GLFW_KEY_D) == GLFW.GLFW_PRESS) strafe += 1;
+                if (GLFW.glfwGetKey(window, GLFW.GLFW_KEY_A) == GLFW.GLFW_PRESS) strafe -= 1;
+                if (GLFW.glfwGetKey(window, GLFW.GLFW_KEY_SPACE) == GLFW.GLFW_PRESS) vertical += 1;
+                if (GLFW.glfwGetKey(window, GLFW.GLFW_KEY_LEFT_SHIFT) == GLFW.GLFW_PRESS) vertical -= 1;
+            }
+
+            double spd = speed.getValue();
+            float yawRad = (float) Math.toRadians(mc.player.getYRot());
+
+            // Correct Minecraft Yaw math (-sin(yaw) is forward X, +cos(yaw) is forward Z)
+            double dx = (-Math.sin(yawRad) * forward - Math.cos(yawRad) * strafe) * spd;
+            double dz = (Math.cos(yawRad) * forward - Math.sin(yawRad) * strafe) * spd;
+            double dy = vertical * spd;
+
+            // Update previous tick coordinates first for butter-smooth frame interpolation
+            cameraDummy.xo = camX;
+            cameraDummy.yo = camY;
+            cameraDummy.zo = camZ;
+
+            camX += dx;
+            camY += dy;
+            camZ += dz;
+
+            cameraDummy.setPos(camX, camY, camZ);
+            syncRotationFrame(mc);
+        }
+
+        public void syncRotationFrame(Minecraft mc) {
+            if (cameraDummy == null || mc.player == null) return;
+            float yaw = mc.player.getYRot();
+            float pitch = mc.player.getXRot();
+
+            cameraDummy.setYRot(yaw);
+            cameraDummy.yRotO = yaw;
+            cameraDummy.setYHeadRot(yaw);
+            cameraDummy.yHeadRotO = yaw;
+            cameraDummy.setYBodyRot(yaw);
+            cameraDummy.yBodyRotO = yaw;
+
+            cameraDummy.setXRot(pitch);
+            cameraDummy.xRotO = pitch;
         }
 
         @Override
@@ -367,19 +439,15 @@ public class ExampleModClient implements ClientModInitializer {
         }
 
         public static void renderModuleEsp(GuiGraphics context, Minecraft mc, Module mod, int sw, int sh, float partialTick) {
-            if (mc.player == null || mc.gameRenderer == null) return;
+            if (mc.player == null || mc.gameRenderer == null || mod.targets.isEmpty()) return;
 
             Camera cam = mc.gameRenderer.getMainCamera();
             initReflection(cam, mc.gameRenderer);
 
-            Vec3 camPos;
-            if (Freecam.isFreecamActive) {
-                camPos = new Vec3(Freecam.camX, Freecam.camY, Freecam.camZ);
-            } else {
-                camPos = mc.player.getEyePosition(partialTick);
-                if (camPosMethod != null) {
-                    try { camPos = (Vec3) camPosMethod.invoke(cam); } catch (Exception ignored) {}
-                }
+            // Because mc.setCameraEntity(cameraDummy) is active, cam already holds the exact Freecam position!
+            Vec3 camPos = mc.player.getEyePosition(partialTick);
+            if (camPosMethod != null) {
+                try { camPos = (Vec3) camPosMethod.invoke(cam); } catch (Exception ignored) {}
             }
 
             Quaternionf invCamRot = null;
