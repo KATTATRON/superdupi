@@ -29,6 +29,7 @@ import org.lwjgl.glfw.GLFW;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
@@ -51,6 +52,7 @@ public class ExampleModClient implements ClientModInitializer {
     private boolean f4WasDown = false;
     private boolean f6WasDown = false;
     private int scanTimer = 0;
+    private Object lastWorld = null;
 
     @Override
     public void onInitializeClient() {
@@ -66,6 +68,15 @@ public class ExampleModClient implements ClientModInitializer {
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             if (client.getWindow() == null) return;
             long window = client.getWindow().handle();
+
+            // Clear ESP cache if switching dimensions/worlds
+            if (client.level != lastWorld) {
+                lastWorld = client.level;
+                for (Module m : MODULES) {
+                    m.cache.clear();
+                    m.targets.clear();
+                }
+            }
 
             boolean f4Down = InputConstants.isKeyDown(client.getWindow(), GLFW.GLFW_KEY_F4);
             if (f4Down && !f4WasDown && client.screen == null) {
@@ -184,6 +195,7 @@ public class ExampleModClient implements ClientModInitializer {
         private boolean enabled = false;
         private boolean expanded = false;
         protected final List<Setting<?>> settings = new ArrayList<>();
+        public final Map<BlockPos, RenderTarget> cache = new HashMap<>();
         public final List<RenderTarget> targets = new ArrayList<>();
 
         public final ModeSetting mode = new ModeSetting("Mode", "Both", "Outline", "Fill", "Both");
@@ -204,10 +216,17 @@ public class ExampleModClient implements ClientModInitializer {
             }
         }
 
+        public void cacheTarget(RenderTarget t) {
+            if (cache.size() < 1500) {
+                cache.put(t.pos, t);
+            }
+        }
+
         public void toggle() {
             this.enabled = !this.enabled;
             Minecraft mc = Minecraft.getInstance();
             if (!this.enabled) {
+                cache.clear();
                 targets.clear();
             } else if (mc.level != null && mc.player != null) {
                 BlockScanner.scanAllEnabled(mc, MODULES);
@@ -263,6 +282,9 @@ public class ExampleModClient implements ClientModInitializer {
         public AmethystGeodeESP() { super("Amethyst Geode", 180, 85, 255, true); }
     }
 
+    // ==========================================
+    // PERSISTENT CACHE SCANNER (Beats Short Server Culling)
+    // ==========================================
     public static class BlockScanner {
         private static Method minYMethod = null;
         private static boolean minYChecked = false;
@@ -300,8 +322,9 @@ public class ExampleModClient implements ClientModInitializer {
             AmethystGeodeESP geodeMod = null;
 
             boolean anyEnabled = false;
+            BlockPos playerPos = mc.player.blockPosition();
+
             for (Module m : modules) {
-                m.targets.clear();
                 if (!m.isEnabled()) continue;
                 if (m instanceof ChestESP c) { chestMod = c; anyEnabled = true; }
                 else if (m instanceof BarrelESP b) { barrelMod = b; anyEnabled = true; }
@@ -312,6 +335,19 @@ public class ExampleModClient implements ClientModInitializer {
                 else if (m instanceof PistonESP p) { pistonMod = p; anyEnabled = true; }
                 else if (m instanceof SpawnerESP sp) { spawnerMod = sp; anyEnabled = true; }
                 else if (m instanceof AmethystGeodeESP g) { geodeMod = g; anyEnabled = true; }
+
+                // Clean up cached blocks ONLY if they were broken (turned to air) nearby or > 500 blocks away
+                if (!(m instanceof AmethystGeodeESP) && !(m instanceof Freecam)) {
+                    Iterator<Map.Entry<BlockPos, RenderTarget>> it = m.cache.entrySet().iterator();
+                    while (it.hasNext()) {
+                        BlockPos pos = it.next().getKey();
+                        if (!pos.closerThan(playerPos, 500.0)) {
+                            it.remove();
+                        } else if (pos.closerThan(playerPos, 24.0) && mc.level.getBlockState(pos).isAir()) {
+                            it.remove();
+                        }
+                    }
+                }
             }
 
             if (!anyEnabled) return;
@@ -319,35 +355,38 @@ public class ExampleModClient implements ClientModInitializer {
             int renderDistance = mc.options.getEffectiveRenderDistance();
             ChunkPos playerChunk = mc.player.chunkPosition();
 
-            // Temporary list to collect raw geode crystal positions for clustering
-            List<BlockPos> rawClusters = new ArrayList<>();
-            int totalClustersFound = 0;
+            // Store weighted crystal points: key = BlockPos, value = growth weight (1 to 4)
+            Map<BlockPos, Integer> rawGeodeBlocks = new HashMap<>();
 
             for (int cx = -renderDistance; cx <= renderDistance; cx++) {
                 for (int cz = -renderDistance; cz <= renderDistance; cz++) {
                     LevelChunk chunk = mc.level.getChunkSource().getChunk(playerChunk.x + cx, playerChunk.z + cz, false);
                     if (chunk == null) continue;
 
+                    // 1. Scan & Cache BlockEntities
                     for (BlockEntity be : chunk.getBlockEntities().values()) {
                         BlockPos p = be.getBlockPos();
                         if (chestMod != null && be instanceof ChestBlockEntity) {
-                            chestMod.targets.add(new RenderTarget(p, 0.0625f, 0.0f, 0.0625f, 0.9375f, 0.875f, 0.9375f));
+                            chestMod.cacheTarget(new RenderTarget(p, 0.0625f, 0.0f, 0.0625f, 0.9375f, 0.875f, 0.9375f));
                         } else if (barrelMod != null && be instanceof BarrelBlockEntity) {
-                            barrelMod.targets.add(new RenderTarget(p));
+                            barrelMod.cacheTarget(new RenderTarget(p));
                         } else if (enderMod != null && be instanceof EnderChestBlockEntity) {
-                            enderMod.targets.add(new RenderTarget(p, 0.0625f, 0.0f, 0.0625f, 0.9375f, 0.875f, 0.9375f));
+                            enderMod.cacheTarget(new RenderTarget(p, 0.0625f, 0.0f, 0.0625f, 0.9375f, 0.875f, 0.9375f));
                         } else if (hopperMod != null && be instanceof HopperBlockEntity) {
-                            hopperMod.targets.add(new RenderTarget(p));
+                            hopperMod.cacheTarget(new RenderTarget(p));
                         } else if (shulkerMod != null && be instanceof ShulkerBoxBlockEntity) {
-                            shulkerMod.targets.add(new RenderTarget(p));
+                            shulkerMod.cacheTarget(new RenderTarget(p));
                         } else if (dropperMod != null && (be instanceof DropperBlockEntity || be instanceof DispenserBlockEntity)) {
-                            dropperMod.targets.add(new RenderTarget(p));
+                            dropperMod.cacheTarget(new RenderTarget(p));
                         } else if (spawnerMod != null && be instanceof SpawnerBlockEntity) {
-                            spawnerMod.targets.add(new RenderTarget(p));
+                            spawnerMod.cacheTarget(new RenderTarget(p));
                         } else if (pistonMod != null && be instanceof PistonMovingBlockEntity) {
-                            pistonMod.targets.add(new RenderTarget(p));
+                            pistonMod.cacheTarget(new RenderTarget(p));
                         }
                     }
+
+                    // 2. Scan Chunk Sections for Pistons & Amethyst Geodes
+                    if (pistonMod == null && geodeMod == null) continue;
 
                     LevelChunkSection[] sections = chunk.getSections();
                     int minY = getChunkMinY(chunk);
@@ -358,8 +397,8 @@ public class ExampleModClient implements ClientModInitializer {
                         LevelChunkSection section = sections[sIdx];
                         if (section == null || section.hasOnlyAir()) continue;
 
-                        boolean wantPistons = pistonMod != null && pistonMod.targets.size() < 600;
-                        boolean wantGeodes = geodeMod != null && totalClustersFound < 300;
+                        boolean wantPistons = pistonMod != null && pistonMod.cache.size() < 600;
+                        boolean wantGeodes = geodeMod != null && rawGeodeBlocks.size() < 500;
 
                         if (wantPistons && section.maybeHas(state -> state.is(Blocks.PISTON) || state.is(Blocks.STICKY_PISTON))) {
                             int sectionBaseY = minY + (sIdx << 4);
@@ -368,23 +407,32 @@ public class ExampleModClient implements ClientModInitializer {
                                     for (int x = 0; x < 16; x++) {
                                         BlockState state = section.getBlockState(x, y, z);
                                         if (state.is(Blocks.PISTON) || state.is(Blocks.STICKY_PISTON)) {
-                                            pistonMod.targets.add(new RenderTarget(new BlockPos(baseX + x, sectionBaseY + y, baseZ + z)));
+                                            pistonMod.cacheTarget(new RenderTarget(new BlockPos(baseX + x, sectionBaseY + y, baseZ + z)));
                                         }
                                     }
                                 }
                             }
                         }
 
-                        // Collect grown amethyst clusters to group into single geode boxes
-                        if (wantGeodes && section.maybeHas(state -> state.is(Blocks.LARGE_AMETHYST_BUD) || state.is(Blocks.MEDIUM_AMETHYST_BUD) || state.is(Blocks.SMALL_AMETHYST_BUD) || state.is(Blocks.AMETHYST_CLUSTER))) {
+                        // Detect all 4 Amethyst growth stages (Small=1, Medium=2, Large=3, Full Cluster=5)
+                        if (wantGeodes && section.maybeHas(state ->
+                                state.is(Blocks.SMALL_AMETHYST_BUD) ||
+                                state.is(Blocks.MEDIUM_AMETHYST_BUD) ||
+                                state.is(Blocks.LARGE_AMETHYST_BUD) ||
+                                state.is(Blocks.AMETHYST_CLUSTER))) {
                             int sectionBaseY = minY + (sIdx << 4);
                             for (int y = 0; y < 16; y++) {
                                 for (int z = 0; z < 16; z++) {
                                     for (int x = 0; x < 16; x++) {
                                         BlockState state = section.getBlockState(x, y, z);
-                                        if (state.is(Blocks.LARGE_AMETHYST_BUD) || state.is(Blocks.MEDIUM_AMETHYST_BUD) || state.is(Blocks.AMETHYST_CLUSTER)) {
-                                            rawClusters.add(new BlockPos(baseX + x, sectionBaseY + y, baseZ + z));
-                                            totalClustersFound++;
+                                        int weight = 0;
+                                        if (state.is(Blocks.AMETHYST_CLUSTER)) weight = 5;
+                                        else if (state.is(Blocks.LARGE_AMETHYST_BUD)) weight = 3;
+                                        else if (state.is(Blocks.MEDIUM_AMETHYST_BUD)) weight = 2;
+                                        else if (state.is(Blocks.SMALL_AMETHYST_BUD)) weight = 1;
+
+                                        if (weight > 0) {
+                                            rawGeodeBlocks.put(new BlockPos(baseX + x, sectionBaseY + y, baseZ + z), weight);
                                         }
                                     }
                                 }
@@ -394,32 +442,46 @@ public class ExampleModClient implements ClientModInitializer {
                 }
             }
 
-            // Cluster raw amethyst points into distinct geodes (1 box per geode cavern)
-            if (geodeMod != null && !rawClusters.isEmpty()) {
-                List<GeodeCluster> geodes = new ArrayList<>();
-                for (BlockPos p : rawClusters) {
-                    GeodeCluster closest = null;
-                    for (GeodeCluster g : geodes) {
-                        if (g.center.closerThan(p, 14.0)) {
-                            closest = g;
-                            break;
+            // Update targets from persistent cache for normal block modules
+            for (Module m : modules) {
+                if (m.isEnabled() && !(m instanceof AmethystGeodeESP) && !(m instanceof Freecam)) {
+                    m.targets.clear();
+                    m.targets.addAll(m.cache.values());
+                }
+            }
+
+            // Cluster grown Amethysts into 1 dynamic box per Geode (scales bigger with growth stage!)
+            if (geodeMod != null) {
+                geodeMod.targets.clear();
+                if (!rawGeodeBlocks.isEmpty()) {
+                    List<GeodeCluster> geodes = new ArrayList<>();
+                    for (Map.Entry<BlockPos, Integer> entry : rawGeodeBlocks.entrySet()) {
+                        BlockPos p = entry.getKey();
+                        int weight = entry.getValue();
+
+                        GeodeCluster closest = null;
+                        for (GeodeCluster g : geodes) {
+                            if (g.center.closerThan(p, 16.0)) {
+                                closest = g;
+                                break;
+                            }
+                        }
+                        if (closest != null) {
+                            closest.add(p, weight);
+                        } else {
+                            geodes.add(new GeodeCluster(p, weight));
                         }
                     }
-                    if (closest != null) {
-                        closest.add(p);
-                    } else {
-                        geodes.add(new GeodeCluster(p));
-                    }
-                }
 
-                // Turn each geode cluster into a dynamic target whose size scales with maturity
-                for (GeodeCluster g : geodes) {
-                    float sizeScale = Math.min(3.5f, 1.0f + (g.count * 0.15f));
-                    geodeMod.targets.add(new RenderTarget(
-                        g.center,
-                        -sizeScale, -sizeScale, -sizeScale,
-                        1.0f + sizeScale, 1.0f + sizeScale, 1.0f + sizeScale
-                    ));
+                    for (GeodeCluster g : geodes) {
+                        // Box grows larger the more full-grown amethyst clusters exist in this geode
+                        float sizeScale = Math.min(4.5f, 0.6f + (g.growthScore * 0.12f));
+                        geodeMod.targets.add(new RenderTarget(
+                            g.center,
+                            -sizeScale, -sizeScale, -sizeScale,
+                            1.0f + sizeScale, 1.0f + sizeScale, 1.0f + sizeScale
+                        ));
+                    }
                 }
             }
         }
@@ -428,18 +490,20 @@ public class ExampleModClient implements ClientModInitializer {
     public static class GeodeCluster {
         public BlockPos center;
         public int count = 0;
+        public int growthScore = 0;
         private long sumX = 0, sumY = 0, sumZ = 0;
 
-        public GeodeCluster(BlockPos p) {
-            add(p);
+        public GeodeCluster(BlockPos p, int weight) {
+            add(p, weight);
         }
 
-        public void add(BlockPos p) {
+        public void add(BlockPos p, int weight) {
             sumX += p.getX();
             sumY += p.getY();
             sumZ += p.getZ();
             count++;
-            center = new BlockPos((int)(sumX / count), (int)(sumY / count), (int)(sumZ / count));
+            growthScore += weight;
+            center = new BlockPos((int) (sumX / count), (int) (sumY / count), (int) (sumZ / count));
         }
     }
 
