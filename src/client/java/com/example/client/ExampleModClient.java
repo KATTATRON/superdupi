@@ -13,6 +13,7 @@ import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.decoration.ArmorStand;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.Blocks;
@@ -21,6 +22,7 @@ import net.minecraft.world.level.block.piston.PistonMovingBlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
@@ -35,6 +37,7 @@ import java.util.Map;
 
 public class ExampleModClient implements ClientModInitializer {
     public static final Freecam FREECAM = new Freecam();
+    public static final ArmorStandESP ARMOR_STAND_ESP = new ArmorStandESP();
 
     public static final List<Module> MODULES = List.of(
         new ChestESP(),
@@ -45,18 +48,41 @@ public class ExampleModClient implements ClientModInitializer {
         new DropperESP(),
         new PistonESP(),
         new SpawnerESP(),
+        new RespawnAnchorESP(),
+        ARMOR_STAND_ESP,
         new AmethystGeodeESP(),
         FREECAM
     );
 
     private boolean f4WasDown = false;
-    private boolean f6WasDown = false;
+    private boolean vWasDown = false;
     private int scanTimer = 0;
     private Object lastWorld = null;
 
     @Override
     public void onInitializeClient() {
+        // 1. START_CLIENT_TICK: Check Keybinds FIRST, then freeze player if Freecam is on
         ClientTickEvents.START_CLIENT_TICK.register(client -> {
+            if (client.getWindow() != null) {
+                long window = client.getWindow().handle();
+
+                // F4 -> Toggle ClickGUI
+                boolean f4Down = InputConstants.isKeyDown(client.getWindow(), GLFW.GLFW_KEY_F4)
+                              || GLFW.glfwGetKey(window, GLFW.GLFW_KEY_F4) == GLFW.GLFW_PRESS;
+                if (f4Down && !f4WasDown && client.screen == null) {
+                    client.setScreen(new ClickGuiScreen(MODULES));
+                }
+                f4WasDown = f4Down;
+
+                // V -> Toggle Freecam (Checked BEFORE KeyMapping.releaseAll() so it never gets blocked!)
+                boolean vDown = InputConstants.isKeyDown(client.getWindow(), GLFW.GLFW_KEY_V)
+                             || GLFW.glfwGetKey(window, GLFW.GLFW_KEY_V) == GLFW.GLFW_PRESS;
+                if (vDown && !vWasDown && client.screen == null) {
+                    FREECAM.toggle();
+                }
+                vWasDown = vDown;
+            }
+
             if (client.player == null || client.level == null) return;
 
             if (FREECAM.isEnabled()) {
@@ -65,6 +91,7 @@ public class ExampleModClient implements ClientModInitializer {
             }
         });
 
+        // 2. END_CLIENT_TICK: World Scanner & Freecam movement
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             if (client.getWindow() == null) return;
             long window = client.getWindow().handle();
@@ -78,23 +105,15 @@ public class ExampleModClient implements ClientModInitializer {
                 }
             }
 
-            boolean f4Down = InputConstants.isKeyDown(client.getWindow(), GLFW.GLFW_KEY_F4);
-            if (f4Down && !f4WasDown && client.screen == null) {
-                client.setScreen(new ClickGuiScreen(MODULES));
-            }
-            f4WasDown = f4Down;
-
-            boolean f6Pressed = GLFW.glfwGetKey(window, GLFW.GLFW_KEY_F6) == GLFW.GLFW_PRESS;
-            if (f6Pressed && !f6WasDown && client.screen == null) {
-                FREECAM.toggle();
-            }
-            f6WasDown = f6Pressed;
-
             if (client.level != null && client.player != null) {
                 scanTimer++;
-                if (scanTimer >= 15) {
+                if (scanTimer >= 12) {
                     scanTimer = 0;
                     BlockScanner.scanAllEnabled(client, MODULES);
+                }
+                // Update ArmorStand entity positions smoothly every tick
+                if (ARMOR_STAND_ESP.isEnabled()) {
+                    BlockScanner.scanArmorStands(client, ARMOR_STAND_ESP);
                 }
             }
 
@@ -103,6 +122,7 @@ public class ExampleModClient implements ClientModInitializer {
             }
         });
 
+        // 3. HUD Render: Smooth Freecam look + 3D ESP
         HudRenderCallback.EVENT.register((context, tickCounter) -> {
             Minecraft mc = Minecraft.getInstance();
             if (mc.level == null || mc.player == null || mc.options.hideGui) return;
@@ -230,6 +250,9 @@ public class ExampleModClient implements ClientModInitializer {
                 targets.clear();
             } else if (mc.level != null && mc.player != null) {
                 BlockScanner.scanAllEnabled(mc, MODULES);
+                if (this instanceof ArmorStandESP a) {
+                    BlockScanner.scanArmorStands(mc, a);
+                }
             }
             if (mc.player != null) {
                 mc.player.displayClientMessage(
@@ -278,12 +301,20 @@ public class ExampleModClient implements ClientModInitializer {
         public SpawnerESP() { super("Spawners", 255, 50, 120, true); }
     }
 
+    public static class RespawnAnchorESP extends Module {
+        public RespawnAnchorESP() { super("Respawn Anchors", 255, 215, 0, true); }
+    }
+
+    public static class ArmorStandESP extends Module {
+        public ArmorStandESP() { super("Armor Stands", 50, 255, 160, true); }
+    }
+
     public static class AmethystGeodeESP extends Module {
         public AmethystGeodeESP() { super("Amethyst Geode", 180, 85, 255, true); }
     }
 
     // ==========================================
-    // PERSISTENT CACHE SCANNER (Beats Short Server Culling)
+    // PERSISTENT CACHE & ENTITY SCANNER
     // ==========================================
     public static class BlockScanner {
         private static Method minYMethod = null;
@@ -308,6 +339,30 @@ public class ExampleModClient implements ClientModInitializer {
             return -64;
         }
 
+        public static void scanArmorStands(Minecraft mc, ArmorStandESP mod) {
+            mod.targets.clear();
+            if (mc.level == null || mc.player == null) return;
+
+            AABB searchBox = mc.player.getBoundingBox().inflate(256.0);
+            List<ArmorStand> stands = mc.level.getEntitiesOfClass(ArmorStand.class, searchBox);
+            for (ArmorStand stand : stands) {
+                // Ignore our own invisible Freecam camera entity!
+                if (stand == FREECAM.getCameraDummy()) continue;
+
+                BlockPos bp = stand.blockPosition();
+                float ox = (float) (stand.getX() - bp.getX());
+                float oy = (float) (stand.getY() - bp.getY());
+                float oz = (float) (stand.getZ() - bp.getZ());
+
+                // Tall 0.5 x 1.975 hitbox around the ArmorStand
+                mod.targets.add(new RenderTarget(
+                    bp,
+                    ox - 0.25f, oy, oz - 0.25f,
+                    ox + 0.25f, oy + 1.975f, oz + 0.25f
+                ));
+            }
+        }
+
         public static void scanAllEnabled(Minecraft mc, List<Module> modules) {
             if (mc.level == null || mc.player == null) return;
 
@@ -319,6 +374,7 @@ public class ExampleModClient implements ClientModInitializer {
             DropperESP dropperMod = null;
             PistonESP pistonMod = null;
             SpawnerESP spawnerMod = null;
+            RespawnAnchorESP anchorMod = null;
             AmethystGeodeESP geodeMod = null;
 
             boolean anyEnabled = false;
@@ -334,10 +390,11 @@ public class ExampleModClient implements ClientModInitializer {
                 else if (m instanceof DropperESP d) { dropperMod = d; anyEnabled = true; }
                 else if (m instanceof PistonESP p) { pistonMod = p; anyEnabled = true; }
                 else if (m instanceof SpawnerESP sp) { spawnerMod = sp; anyEnabled = true; }
+                else if (m instanceof RespawnAnchorESP ra) { anchorMod = ra; anyEnabled = true; }
                 else if (m instanceof AmethystGeodeESP g) { geodeMod = g; anyEnabled = true; }
 
-                // Clean up cached blocks ONLY if they were broken (turned to air) nearby or > 500 blocks away
-                if (!(m instanceof AmethystGeodeESP) && !(m instanceof Freecam)) {
+                // Clean up broken blocks from persistent cache
+                if (!(m instanceof AmethystGeodeESP) && !(m instanceof ArmorStandESP) && !(m instanceof Freecam)) {
                     Iterator<Map.Entry<BlockPos, RenderTarget>> it = m.cache.entrySet().iterator();
                     while (it.hasNext()) {
                         BlockPos pos = it.next().getKey();
@@ -355,7 +412,6 @@ public class ExampleModClient implements ClientModInitializer {
             int renderDistance = mc.options.getEffectiveRenderDistance();
             ChunkPos playerChunk = mc.player.chunkPosition();
 
-            // Store weighted crystal points: key = BlockPos, value = growth weight (1 to 4)
             Map<BlockPos, Integer> rawGeodeBlocks = new HashMap<>();
 
             for (int cx = -renderDistance; cx <= renderDistance; cx++) {
@@ -363,7 +419,7 @@ public class ExampleModClient implements ClientModInitializer {
                     LevelChunk chunk = mc.level.getChunkSource().getChunk(playerChunk.x + cx, playerChunk.z + cz, false);
                     if (chunk == null) continue;
 
-                    // 1. Scan & Cache BlockEntities
+                    // 1. Scan BlockEntities
                     for (BlockEntity be : chunk.getBlockEntities().values()) {
                         BlockPos p = be.getBlockPos();
                         if (chestMod != null && be instanceof ChestBlockEntity) {
@@ -385,8 +441,8 @@ public class ExampleModClient implements ClientModInitializer {
                         }
                     }
 
-                    // 2. Scan Chunk Sections for Pistons & Amethyst Geodes
-                    if (pistonMod == null && geodeMod == null) continue;
+                    // 2. Scan Chunk Sections for Pistons, Respawn Anchors & Amethyst Geodes
+                    if (pistonMod == null && anchorMod == null && geodeMod == null) continue;
 
                     LevelChunkSection[] sections = chunk.getSections();
                     int minY = getChunkMinY(chunk);
@@ -398,6 +454,7 @@ public class ExampleModClient implements ClientModInitializer {
                         if (section == null || section.hasOnlyAir()) continue;
 
                         boolean wantPistons = pistonMod != null && pistonMod.cache.size() < 600;
+                        boolean wantAnchors = anchorMod != null && anchorMod.cache.size() < 400;
                         boolean wantGeodes = geodeMod != null && rawGeodeBlocks.size() < 500;
 
                         if (wantPistons && section.maybeHas(state -> state.is(Blocks.PISTON) || state.is(Blocks.STICKY_PISTON))) {
@@ -414,7 +471,20 @@ public class ExampleModClient implements ClientModInitializer {
                             }
                         }
 
-                        // Detect all 4 Amethyst growth stages (Small=1, Medium=2, Large=3, Full Cluster=5)
+                        if (wantAnchors && section.maybeHas(state -> state.is(Blocks.RESPAWN_ANCHOR))) {
+                            int sectionBaseY = minY + (sIdx << 4);
+                            for (int y = 0; y < 16; y++) {
+                                for (int z = 0; z < 16; z++) {
+                                    for (int x = 0; x < 16; x++) {
+                                        BlockState state = section.getBlockState(x, y, z);
+                                        if (state.is(Blocks.RESPAWN_ANCHOR)) {
+                                            anchorMod.cacheTarget(new RenderTarget(new BlockPos(baseX + x, sectionBaseY + y, baseZ + z)));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         if (wantGeodes && section.maybeHas(state ->
                                 state.is(Blocks.SMALL_AMETHYST_BUD) ||
                                 state.is(Blocks.MEDIUM_AMETHYST_BUD) ||
@@ -442,15 +512,13 @@ public class ExampleModClient implements ClientModInitializer {
                 }
             }
 
-            // Update targets from persistent cache for normal block modules
             for (Module m : modules) {
-                if (m.isEnabled() && !(m instanceof AmethystGeodeESP) && !(m instanceof Freecam)) {
+                if (m.isEnabled() && !(m instanceof AmethystGeodeESP) && !(m instanceof ArmorStandESP) && !(m instanceof Freecam)) {
                     m.targets.clear();
                     m.targets.addAll(m.cache.values());
                 }
             }
 
-            // Cluster grown Amethysts into 1 dynamic box per Geode (scales bigger with growth stage!)
             if (geodeMod != null) {
                 geodeMod.targets.clear();
                 if (!rawGeodeBlocks.isEmpty()) {
@@ -474,7 +542,6 @@ public class ExampleModClient implements ClientModInitializer {
                     }
 
                     for (GeodeCluster g : geodes) {
-                        // Box grows larger the more full-grown amethyst clusters exist in this geode
                         float sizeScale = Math.min(4.5f, 0.6f + (g.growthScore * 0.12f));
                         geodeMod.targets.add(new RenderTarget(
                             g.center,
@@ -507,6 +574,9 @@ public class ExampleModClient implements ClientModInitializer {
         }
     }
 
+    // ==========================================
+    // FREECAM MODULE [Keybind: V]
+    // ==========================================
     public static class Freecam extends Module {
         public final NumberSetting speed = new NumberSetting("Speed", 1.0, 0.1, 5.0, 0.1);
 
@@ -519,8 +589,12 @@ public class ExampleModClient implements ClientModInitializer {
         public static boolean isFreecamActive = false;
 
         public Freecam() {
-            super("Freecam [F6]", 50, 200, 255, false);
+            super("Freecam [V]", 50, 200, 255, false);
             settings.add(speed);
+        }
+
+        public ArmorStand getCameraDummy() {
+            return cameraDummy;
         }
 
         @Override
@@ -871,10 +945,13 @@ public class ExampleModClient implements ClientModInitializer {
         }
     }
 
+    // ==========================================
+    // TWO-COLUMN CLICKGUI SCREEN
+    // ==========================================
     public static class ClickGuiScreen extends Screen {
         private final List<Module> modules;
         private NumberSetting draggingSlider = null;
-        private final int panelX = 35, panelY = 30, panelWidth = 195;
+        private final int col1X = 30, col2X = 240, panelY = 25, panelWidth = 195;
         private boolean leftWasDown = false;
         private boolean rightWasDown = false;
 
@@ -912,53 +989,61 @@ public class ExampleModClient implements ClientModInitializer {
                 }
             }
 
-            context.fill(panelX, panelY - 2, panelX + panelWidth, panelY, 0xFF8A2BE2);
-            context.fill(panelX, panelY, panelX + panelWidth, panelY + 20, 0xF014141D);
-            context.drawString(this.font, "✦ BLOCK ESP & CLIENT", panelX + 8, panelY + 6, 0xFFFFFFFF, true);
+            // Column 1: Storage & Redstone ESP (First 7 modules)
+            renderColumn(context, "✦ STORAGE & REDSTONE", modules.subList(0, 7), col1X, panelY, mouseX, mouseY);
 
-            int currentY = panelY + 20;
-            for (Module mod : modules) {
-                boolean hovered = isHovered(mouseX, mouseY, panelX, currentY, panelWidth, 18);
+            // Column 2: World, Entities & Client (Remaining 5 modules)
+            renderColumn(context, "✦ WORLD & UTILITY", modules.subList(7, modules.size()), col2X, panelY, mouseX, mouseY);
+        }
+
+        private void renderColumn(GuiGraphics context, String title, List<Module> colModules, int x, int startY, int mouseX, int mouseY) {
+            context.fill(x, startY - 2, x + panelWidth, startY, 0xFF8A2BE2);
+            context.fill(x, startY, x + panelWidth, startY + 20, 0xF014141D);
+            context.drawString(this.font, title, x + 8, startY + 6, 0xFFFFFFFF, true);
+
+            int currentY = startY + 20;
+            for (Module mod : colModules) {
+                boolean hovered = isHovered(mouseX, mouseY, x, currentY, panelWidth, 18);
                 int bgColor = mod.isEnabled() ? 0xE6251B38 : (hovered ? 0xE61E1E2A : 0xE6161620);
-                context.fill(panelX, currentY, panelX + panelWidth, currentY + 18, bgColor);
+                context.fill(x, currentY, x + panelWidth, currentY + 18, bgColor);
 
                 if (mod.isEnabled()) {
                     int sideBarColor = (0xFF << 24)
                         | ((mod.red.getValue().intValue() & 0xFF) << 16)
                         | ((mod.green.getValue().intValue() & 0xFF) << 8)
                         | (mod.blue.getValue().intValue() & 0xFF);
-                    context.fill(panelX, currentY, panelX + 3, currentY + 18, sideBarColor);
+                    context.fill(x, currentY, x + 3, currentY + 18, sideBarColor);
                 }
 
                 String label = mod.getName() + (mod.isEnabled() && !(mod instanceof Freecam) ? " [" + mod.targets.size() + "]" : "");
-                context.drawString(this.font, label, panelX + 8, currentY + 5, mod.isEnabled() ? 0xFFD8B4FE : 0xFFAAAAAA, true);
-                context.drawString(this.font, mod.isExpanded() ? "▾" : "▸", panelX + panelWidth - 12, currentY + 5, 0xFF888888, true);
+                context.drawString(this.font, label, x + 8, currentY + 5, mod.isEnabled() ? 0xFFD8B4FE : 0xFFAAAAAA, true);
+                context.drawString(this.font, mod.isExpanded() ? "▾" : "▸", x + panelWidth - 12, currentY + 5, 0xFF888888, true);
                 currentY += 18;
 
                 if (mod.isExpanded()) {
                     for (Setting<?> setting : mod.getSettings()) {
-                        context.fill(panelX, currentY, panelX + panelWidth, currentY + 16, 0xF0101016);
+                        context.fill(x, currentY, x + panelWidth, currentY + 16, 0xF0101016);
 
                         if (setting instanceof BooleanSetting boolSet) {
-                            context.drawString(this.font, boolSet.getName(), panelX + 12, currentY + 4, 0xFFCCCCCC, true);
+                            context.drawString(this.font, boolSet.getName(), x + 12, currentY + 4, 0xFFCCCCCC, true);
                             int boxColor = boolSet.getValue() ? 0xFF8A2BE2 : 0xFF2A2A35;
-                            context.fill(panelX + panelWidth - 18, currentY + 4, panelX + panelWidth - 10, currentY + 12, boxColor);
+                            context.fill(x + panelWidth - 18, currentY + 4, x + panelWidth - 10, currentY + 12, boxColor);
                         } else if (setting instanceof ModeSetting modeSet) {
-                            context.drawString(this.font, modeSet.getName() + ": " + modeSet.getValue(), panelX + 12, currentY + 4, 0xFFB39DDB, true);
+                            context.drawString(this.font, modeSet.getName() + ": " + modeSet.getValue(), x + 12, currentY + 4, 0xFFB39DDB, true);
                         } else if (setting instanceof NumberSetting numSet) {
                             if (draggingSlider == numSet) {
-                                double percent = Math.max(0, Math.min(1, (double) (mouseX - (panelX + 10)) / (panelWidth - 20)));
+                                double percent = Math.max(0, Math.min(1, (double) (mouseX - (x + 10)) / (panelWidth - 20)));
                                 numSet.setClampedValue(numSet.getMin() + (numSet.getMax() - numSet.getMin()) * percent);
                             }
                             double pct = (numSet.getValue() - numSet.getMin()) / (numSet.getMax() - numSet.getMin());
                             int barWidth = (int) ((panelWidth - 20) * pct);
 
-                            context.fill(panelX + 10, currentY + 12, panelX + panelWidth - 10, currentY + 14, 0xFF252530);
-                            context.fill(panelX + 10, currentY + 12, panelX + 10 + barWidth, currentY + 14, 0xFF8A2BE2);
+                            context.fill(x + 10, currentY + 12, x + panelWidth - 10, currentY + 14, 0xFF252530);
+                            context.fill(x + 10, currentY + 12, x + 10 + barWidth, currentY + 14, 0xFF8A2BE2);
                             String valStr = numSet.step < 1.0
                                 ? String.format("%.1f", numSet.getValue())
                                 : String.valueOf(numSet.getValue().intValue());
-                            context.drawString(this.font, numSet.getName() + ": " + valStr, panelX + 12, currentY + 2, 0xFFCCCCCC, true);
+                            context.drawString(this.font, numSet.getName() + ": " + valStr, x + 12, currentY + 2, 0xFFCCCCCC, true);
                         }
                         currentY += 16;
                     }
@@ -967,27 +1052,33 @@ public class ExampleModClient implements ClientModInitializer {
         }
 
         private void handleMouseClick(double mouseX, double mouseY, int button) {
-            int currentY = panelY + 20;
-            for (Module mod : modules) {
-                if (isHovered(mouseX, mouseY, panelX, currentY, panelWidth, 18)) {
+            if (checkColumnClick(modules.subList(0, 7), col1X, panelY, mouseX, mouseY, button)) return;
+            checkColumnClick(modules.subList(7, modules.size()), col2X, panelY, mouseX, mouseY, button);
+        }
+
+        private boolean checkColumnClick(List<Module> colModules, int x, int startY, double mouseX, double mouseY, int button) {
+            int currentY = startY + 20;
+            for (Module mod : colModules) {
+                if (isHovered(mouseX, mouseY, x, currentY, panelWidth, 18)) {
                     if (button == 0) mod.toggle();
                     if (button == 1) mod.setExpanded(!mod.isExpanded());
-                    return;
+                    return true;
                 }
                 currentY += 18;
 
                 if (mod.isExpanded()) {
                     for (Setting<?> setting : mod.getSettings()) {
-                        if (isHovered(mouseX, mouseY, panelX, currentY, panelWidth, 16) && button == 0) {
+                        if (isHovered(mouseX, mouseY, x, currentY, panelWidth, 16) && button == 0) {
                             if (setting instanceof BooleanSetting b) b.toggle();
                             else if (setting instanceof ModeSetting m) m.cycle();
                             else if (setting instanceof NumberSetting n) draggingSlider = n;
-                            return;
+                            return true;
                         }
                         currentY += 16;
                     }
                 }
             }
+            return false;
         }
 
         @Override
