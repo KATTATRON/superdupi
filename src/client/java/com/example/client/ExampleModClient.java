@@ -13,9 +13,10 @@ import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.decoration.ArmorStand;
 import net.minecraft.world.entity.player.Player;
-import net.minecraft.world.entity.vehicle.AbstractMinecartContainer;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.ChunkPos;
@@ -164,7 +165,6 @@ public class ExampleModClient implements ClientModInitializer {
                 }
             }
 
-            // Stash Finder Pop-up unten am Bildschirm rendern
             if (STASH_FINDER.isEnabled()) {
                 STASH_FINDER.renderBottomPopup(context, mc, sw, sh);
             }
@@ -341,7 +341,6 @@ public class ExampleModClient implements ClientModInitializer {
         public ArmorStandESP() { super("Armor Stands", 50, 255, 160, true); }
     }
 
-    // NEU: Chest & Hopper Minecart ESP im Block ESP Dropdown
     public static class MinecartESP extends Module {
         public MinecartESP() { super("Minecarts (Chest/Hopper)", 255, 140, 0, true); }
     }
@@ -382,9 +381,6 @@ public class ExampleModClient implements ClientModInitializer {
         }
     }
 
-    // ==========================================
-    // NEU: STASH FINDER (Mit Pop-up unten am Bildschirm statt im Chat!)
-    // ==========================================
     public static class StashFinder extends Module {
         public final NumberSetting minBlocks = new NumberSetting("Min Containers", 15, 5, 100, 1);
         public final Set<Long> alertedChunks = new HashSet<>();
@@ -407,7 +403,7 @@ public class ExampleModClient implements ClientModInitializer {
             if (hoppers > 0) details.append("Hoppers: ").append(hoppers).append("  ");
             if (carts > 0) details.append("Minecarts: ").append(carts);
             this.popupSub = details.toString().trim();
-            this.popupEndTime = System.currentTimeMillis() + 8000L; // 8 Sekunden Einblendung
+            this.popupEndTime = System.currentTimeMillis() + 8000L;
         }
 
         public void renderBottomPopup(GuiGraphics context, Minecraft mc, int sw, int sh) {
@@ -420,9 +416,8 @@ public class ExampleModClient implements ClientModInitializer {
             int boxH = popupSub.isEmpty() ? 20 : 32;
 
             int bx = (sw - boxW) / 2;
-            int by = sh - 68 - boxH; // Direkt über der Hotbar / Actionbar unten am Bildschirm
+            int by = sh - 68 - boxH;
 
-            // Dunkler Hintergrund + Violett/Goldener Rahmen
             context.fill(bx - 1, by - 1, bx + boxW + 1, by + boxH + 1, 0xFFFFD700);
             context.fill(bx, by, bx + boxW, by + boxH, 0xEE12121A);
 
@@ -459,6 +454,11 @@ public class ExampleModClient implements ClientModInitializer {
             return -64;
         }
 
+        private static boolean isStorageMinecart(Entity e) {
+            EntityType<?> t = e.getType();
+            return t == EntityType.CHEST_MINECART || t == EntityType.HOPPER_MINECART;
+        }
+
         public static void scanArmorStands(Minecraft mc, ArmorStandESP mod) {
             mod.targets.clear();
             if (mc.level == null || mc.player == null) return;
@@ -481,14 +481,14 @@ public class ExampleModClient implements ClientModInitializer {
             }
         }
 
-        // Scannt alle Chest-Minecarts und Hopper-Minecarts
+        // Scannt Chest- und Hopper-Minecarts über EntityType (100% 1.21.11 kompatibel)
         public static void scanMinecarts(Minecraft mc, MinecartESP mod) {
             mod.targets.clear();
             if (mc.level == null || mc.player == null) return;
 
             AABB searchBox = mc.player.getBoundingBox().inflate(256.0);
-            List<AbstractMinecartContainer> carts = mc.level.getEntitiesOfClass(AbstractMinecartContainer.class, searchBox);
-            for (AbstractMinecartContainer cart : carts) {
+            List<Entity> carts = mc.level.getEntities(mc.player, searchBox, BlockScanner::isStorageMinecart);
+            for (Entity cart : carts) {
                 BlockPos bp = cart.blockPosition();
                 float ox = (float) (cart.getX() - bp.getX());
                 float oy = (float) (cart.getY() - bp.getY());
@@ -548,11 +548,10 @@ public class ExampleModClient implements ClientModInitializer {
 
             if (!anyEnabled) return;
 
-            // Optional: Zähle Container-Minecarts pro Chunk für den Stash Finder
             Map<Long, Integer> cartsPerChunk = new HashMap<>();
             if (wantStash) {
                 AABB searchBox = mc.player.getBoundingBox().inflate(256.0);
-                for (AbstractMinecartContainer cart : mc.level.getEntitiesOfClass(AbstractMinecartContainer.class, searchBox)) {
+                for (Entity cart : mc.level.getEntities(mc.player, searchBox, BlockScanner::isStorageMinecart)) {
                     long cKey = cart.chunkPosition().toLong();
                     cartsPerChunk.put(cKey, cartsPerChunk.getOrDefault(cKey, 0) + 1);
                 }
@@ -596,7 +595,6 @@ public class ExampleModClient implements ClientModInitializer {
                         }
                     }
 
-                    // Stash Finder Auswertung für diesen Chunk
                     if (wantStash) {
                         long chunkKey = chunk.getPos().toLong();
                         int cCarts = cartsPerChunk.getOrDefault(chunkKey, 0);
@@ -1316,7 +1314,6 @@ public class ExampleModClient implements ClientModInitializer {
                 EspRenderer.renderPvpEsp(context, mc, PVP_ESP, this.width, this.height, delta);
             }
 
-            // LINKER HAUPTPUNKT: "BLOCK ESP" (Aufklappbares Dropdown)
             boolean headerHovered = isHovered(mouseX, mouseY, col1X, panelY, panelWidth, 22);
             context.fill(col1X, panelY - 2, col1X + panelWidth, panelY, 0xFF8A2BE2);
             context.fill(col1X, panelY, col1X + panelWidth, panelY + 22, headerHovered ? 0xF0221C35 : 0xF014141D);
@@ -1333,7 +1330,6 @@ public class ExampleModClient implements ClientModInitializer {
                 }
             }
 
-            // RECHTER HAUPTPUNKT: "PVP & UTILITY" (PvP + Stash Finder + Freecam)
             context.fill(col2X, panelY - 2, col2X + panelWidth, panelY, 0xFFFF3737);
             context.fill(col2X, panelY, col2X + panelWidth, panelY + 22, 0xF014141D);
             context.drawString(this.font, "⚔ PVP & UTILITY", col2X + 8, panelY + 7, 0xFFFFFFFF, true);
