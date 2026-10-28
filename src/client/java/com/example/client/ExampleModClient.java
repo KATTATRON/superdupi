@@ -387,7 +387,8 @@ public class ExampleModClient implements ClientModInitializer {
         public static int calculateArmorPercent(Player p) {
             int totalMax = 0;
             int totalCurrent = 0;
-            for (ItemStack armor : p.getArmorSlots()) {
+            for (int i = 0; i < 4; i++) {
+                ItemStack armor = p.getInventory().getArmor(i);
                 if (!armor.isEmpty() && armor.isDamageableItem()) {
                     totalMax += armor.getMaxDamage();
                     totalCurrent += (armor.getMaxDamage() - armor.getDamageValue());
@@ -398,9 +399,6 @@ public class ExampleModClient implements ClientModInitializer {
         }
     }
 
-    // ==========================================
-    // STASH FINDER (Mit dauerhafter Box & Tracer bis zur Nähe)
-    // ==========================================
     public static class StashFinder extends Module {
         public final NumberSetting minBlocks = new NumberSetting("Min Containers", 15, 5, 100, 1);
         public final Set<Long> alertedChunks = new HashSet<>();
@@ -428,12 +426,10 @@ public class ExampleModClient implements ClientModInitializer {
                 Map.Entry<Long, BlockPos> entry = it.next();
                 BlockPos pos = entry.getValue();
 
-                // Wenn man nah genug ist (unter 24 Blöcke), verschwindet die Stash-Box, um den Blick freizugeben
                 if (pos.closerThan(player.blockPosition(), 24.0)) {
                     continue;
                 }
 
-                // Box um den Stash-Mittelpunkt (Größe 4x3x4)
                 targets.add(new RenderTarget(
                     pos,
                     -2.0f, 0.0f, -2.0f,
@@ -476,9 +472,6 @@ public class ExampleModClient implements ClientModInitializer {
         }
     }
 
-    // ==========================================
-    // PERSISTENT CACHE & SCANNER
-    // ==========================================
     public static class BlockScanner {
         private static Method minYMethod = null;
         private static boolean minYChecked = false;
@@ -797,9 +790,6 @@ public class ExampleModClient implements ClientModInitializer {
         }
     }
 
-    // ==========================================
-    // FREECAM MODULE [Keybind: V]
-    // ==========================================
     public static class Freecam extends Module {
         public final NumberSetting speed = new NumberSetting("Speed", 1.0, 0.1, 5.0, 0.1);
 
@@ -971,9 +961,6 @@ public class ExampleModClient implements ClientModInitializer {
         }
     }
 
-    // ==========================================
-    // 3D ESP & PVP RENDERER
-    // ==========================================
     public static class EspRenderer {
         private static final int[][] EDGES = {
             {0,1}, {1,3}, {3,2}, {2,0},
