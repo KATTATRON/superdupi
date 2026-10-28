@@ -175,7 +175,6 @@ public class ExampleModClient implements ClientModInitializer {
                 STASH_FINDER.renderBottomPopup(context, mc, sw, sh);
             }
 
-            // Name: FISH Overlay auf dem Bildschirm
             if (PVP_ESP.fishName.getValue()) {
                 context.drawString(mc.font, "§d[PvP] §fName: §bFISH", sw - 85, 8, 0xFFFFFFFF, true);
             }
@@ -247,9 +246,6 @@ public class ExampleModClient implements ClientModInitializer {
         public double getMax() { return max; }
     }
 
-    // ==========================================
-    // MODULES
-    // ==========================================
     public static abstract class Module {
         private final String name;
         private boolean enabled = false;
@@ -1349,9 +1345,6 @@ public class ExampleModClient implements ClientModInitializer {
         }
     }
 
-    // ==========================================
-    // CLICKGUI SCREEN
-    // ==========================================
     public static class ClickGuiScreen extends Screen {
         private static boolean blockEspTabExpanded = true;
         private NumberSetting draggingSlider = null;
@@ -1456,7 +1449,7 @@ public class ExampleModClient implements ClientModInitializer {
                     if (setting instanceof BooleanSetting boolSet) {
                         context.drawString(this.font, boolSet.getName(), x + 14, currentY + 4, 0xFFCCCCCC, true);
                         int boxColor = boolSet.getValue() ? 0xFF8A2BE2 : 0xFF2A2A35;
-                        context.fill(panelX + panelWidth - 18, currentY + 4, panelX + panelWidth - 10, currentY + 12, boxColor);
+                        context.fill(x + panelWidth - 18, currentY + 4, x + panelWidth - 10, currentY + 12, boxColor);
                     } else if (setting instanceof ModeSetting modeSet) {
                         context.drawString(this.font, modeSet.getName() + ": " + modeSet.getValue(), x + 14, currentY + 4, 0xFFB39DDB, true);
                     } else if (setting instanceof NumberSetting numSet) {
