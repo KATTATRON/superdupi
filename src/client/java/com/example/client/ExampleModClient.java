@@ -170,8 +170,14 @@ public class ExampleModClient implements ClientModInitializer {
                 }
             }
 
+            // Stash Finder Bottom Pop-up
             if (STASH_FINDER.isEnabled()) {
                 STASH_FINDER.renderBottomPopup(context, mc, sw, sh);
+            }
+
+            // Name: FISH Wasserzeichen / Status auf dem Bildschirm
+            if (PVP_ESP.fishName.getValue()) {
+                context.drawString(mc.font, "§bName: §fFISH", sw - 75, 8, 0xFFFFFFFF, true);
             }
         });
 
@@ -355,12 +361,14 @@ public class ExampleModClient implements ClientModInitializer {
         public final BooleanSetting showHandItem = new BooleanSetting("Show Hand Item", true);
         public final BooleanSetting showTotems = new BooleanSetting("Show Totem Count", true);
         public final BooleanSetting showArmor = new BooleanSetting("Show Armor & HP", true);
+        public final BooleanSetting fishName = new BooleanSetting("Name: FISH", false);
 
         public PvpESP() {
             super("PvP", 255, 55, 55, true);
             settings.add(1, showHandItem);
             settings.add(2, showTotems);
             settings.add(3, showArmor);
+            settings.add(4, fishName);
         }
 
         public static int countPlayerTotems(Player p) {
@@ -387,11 +395,14 @@ public class ExampleModClient implements ClientModInitializer {
         public static int calculateArmorPercent(Player p) {
             int totalMax = 0;
             int totalCurrent = 0;
-            for (int i = 0; i < 4; i++) {
-                ItemStack armor = p.getInventory().getArmor(i);
-                if (!armor.isEmpty() && armor.isDamageableItem()) {
-                    totalMax += armor.getMaxDamage();
-                    totalCurrent += (armor.getMaxDamage() - armor.getDamageValue());
+            for (ItemStack armor : p.getArmorSlots()) {
+                if (!armor.isEmpty()) {
+                    int max = armor.getMaxDamage();
+                    if (max > 0) {
+                        totalMax += max;
+                        int dmg = armor.getDamageValue();
+                        totalCurrent += Math.max(0, max - dmg);
+                    }
                 }
             }
             if (totalMax == 0) return 100;
@@ -729,7 +740,7 @@ public class ExampleModClient implements ClientModInitializer {
             }
 
             for (Module m : modules) {
-                if (m.isEnabled() && !(m instanceof AmethystGeodeESP) && !(m instanceof ArmorStandESP) && !(m instanceof MinecartESP)) {
+                if (m.isEnabled() && !(m instanceof AmethystGeodeESP) && !(m instanceof ArmorStandESP) && !(m instanceof MinecartESP) && !(m instanceof StashFinder)) {
                     m.targets.clear();
                     m.targets.addAll(m.cache.values());
                 }
@@ -1159,7 +1170,7 @@ public class ExampleModClient implements ClientModInitializer {
             mod.targets.clear();
 
             for (Player targetPlayer : mc.level.players()) {
-                if (targetPlayer == mc.player) continue;
+                if (targetPlayer == mc.player && !Freecam.isFreecamActive) continue;
                 mod.targets.add(new RenderTarget(targetPlayer.blockPosition()));
 
                 double px = targetPlayer.xo + (targetPlayer.getX() - targetPlayer.xo) * partialTick;
@@ -1231,7 +1242,13 @@ public class ExampleModClient implements ClientModInitializer {
 
                 int tagY = Math.max(12, Math.round(minScreenY) - 24);
                 int dist = (int) Math.round(mc.player.distanceTo(targetPlayer));
-                String nameLine = "§c" + targetPlayer.getName().getString() + " §7[" + dist + "m]";
+
+                // Name: FISH Logik
+                String pName = targetPlayer.getName().getString();
+                if (mod.fishName.getValue() && mc.player != null && targetPlayer.getUUID().equals(mc.player.getUUID())) {
+                    pName = "FISH";
+                }
+                String nameLine = "§c" + pName + " §7[" + dist + "m]";
 
                 ItemStack mainHand = targetPlayer.getMainHandItem();
                 ItemStack offHand = targetPlayer.getOffhandItem();
@@ -1328,9 +1345,6 @@ public class ExampleModClient implements ClientModInitializer {
         }
     }
 
-    // ==========================================
-    // CLICKGUI SCREEN
-    // ==========================================
     public static class ClickGuiScreen extends Screen {
         private static boolean blockEspTabExpanded = true;
         private NumberSetting draggingSlider = null;
