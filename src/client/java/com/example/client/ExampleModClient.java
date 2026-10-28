@@ -13,8 +13,10 @@ import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
-import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.decoration.ArmorStand;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.*;
@@ -38,8 +40,9 @@ import java.util.Map;
 public class ExampleModClient implements ClientModInitializer {
     public static final Freecam FREECAM = new Freecam();
     public static final ArmorStandESP ARMOR_STAND_ESP = new ArmorStandESP();
+    public static final PvpESP PVP_ESP = new PvpESP();
 
-    public static final List<Module> MODULES = List.of(
+    public static final List<Module> BLOCK_MODULES = List.of(
         new ChestESP(),
         new BarrelESP(),
         new EnderChestESP(),
@@ -50,9 +53,15 @@ public class ExampleModClient implements ClientModInitializer {
         new SpawnerESP(),
         new RespawnAnchorESP(),
         ARMOR_STAND_ESP,
-        new AmethystGeodeESP(),
-        FREECAM
+        new AmethystGeodeESP()
     );
+
+    public static final List<Module> MODULES = new ArrayList<>();
+    static {
+        MODULES.addAll(BLOCK_MODULES);
+        MODULES.add(PVP_ESP);
+        MODULES.add(FREECAM);
+    }
 
     private boolean f4WasDown = false;
     private boolean vWasDown = false;
@@ -61,20 +70,18 @@ public class ExampleModClient implements ClientModInitializer {
 
     @Override
     public void onInitializeClient() {
-        // 1. START_CLIENT_TICK: Check Keybinds FIRST, then freeze player if Freecam is on
+        // 1. START_CLIENT_TICK: Keybinds prüfen, danach Spieler einfrieren falls Freecam aktiv
         ClientTickEvents.START_CLIENT_TICK.register(client -> {
             if (client.getWindow() != null) {
                 long window = client.getWindow().handle();
 
-                // F4 -> Toggle ClickGUI
                 boolean f4Down = InputConstants.isKeyDown(client.getWindow(), GLFW.GLFW_KEY_F4)
                               || GLFW.glfwGetKey(window, GLFW.GLFW_KEY_F4) == GLFW.GLFW_PRESS;
                 if (f4Down && !f4WasDown && client.screen == null) {
-                    client.setScreen(new ClickGuiScreen(MODULES));
+                    client.setScreen(new ClickGuiScreen());
                 }
                 f4WasDown = f4Down;
 
-                // V -> Toggle Freecam (Checked BEFORE KeyMapping.releaseAll() so it never gets blocked!)
                 boolean vDown = InputConstants.isKeyDown(client.getWindow(), GLFW.GLFW_KEY_V)
                              || GLFW.glfwGetKey(window, GLFW.GLFW_KEY_V) == GLFW.GLFW_PRESS;
                 if (vDown && !vWasDown && client.screen == null) {
@@ -91,12 +98,11 @@ public class ExampleModClient implements ClientModInitializer {
             }
         });
 
-        // 2. END_CLIENT_TICK: World Scanner & Freecam movement
+        // 2. END_CLIENT_TICK: Scanner & Freecam Bewegung
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             if (client.getWindow() == null) return;
             long window = client.getWindow().handle();
 
-            // Clear ESP cache if switching dimensions/worlds
             if (client.level != lastWorld) {
                 lastWorld = client.level;
                 for (Module m : MODULES) {
@@ -109,9 +115,8 @@ public class ExampleModClient implements ClientModInitializer {
                 scanTimer++;
                 if (scanTimer >= 12) {
                     scanTimer = 0;
-                    BlockScanner.scanAllEnabled(client, MODULES);
+                    BlockScanner.scanAllEnabled(client, BLOCK_MODULES);
                 }
-                // Update ArmorStand entity positions smoothly every tick
                 if (ARMOR_STAND_ESP.isEnabled()) {
                     BlockScanner.scanArmorStands(client, ARMOR_STAND_ESP);
                 }
@@ -122,7 +127,7 @@ public class ExampleModClient implements ClientModInitializer {
             }
         });
 
-        // 3. HUD Render: Smooth Freecam look + 3D ESP
+        // 3. HUD Render: 3D Block ESP + PvP Player ESP + Tracer-Linien
         HudRenderCallback.EVENT.register((context, tickCounter) -> {
             Minecraft mc = Minecraft.getInstance();
             if (mc.level == null || mc.player == null || mc.options.hideGui) return;
@@ -137,10 +142,14 @@ public class ExampleModClient implements ClientModInitializer {
             int sw = mc.getWindow().getGuiScaledWidth();
             int sh = mc.getWindow().getGuiScaledHeight();
 
-            for (Module mod : MODULES) {
+            for (Module mod : BLOCK_MODULES) {
                 if (mod.isEnabled() && !mod.targets.isEmpty()) {
                     EspRenderer.renderModuleEsp(context, mc, mod, sw, sh, partialTick);
                 }
+            }
+
+            if (PVP_ESP.isEnabled()) {
+                EspRenderer.renderPvpEsp(context, mc, PVP_ESP, sw, sh, partialTick);
             }
         });
 
@@ -148,7 +157,7 @@ public class ExampleModClient implements ClientModInitializer {
             dispatcher.register(ClientCommandManager.literal("clickgui")
                 .executes(c -> {
                     Minecraft mc = Minecraft.getInstance();
-                    mc.execute(() -> mc.setScreen(new ClickGuiScreen(MODULES)));
+                    mc.execute(() -> mc.setScreen(new ClickGuiScreen()));
                     return 1;
                 }));
         });
@@ -210,6 +219,9 @@ public class ExampleModClient implements ClientModInitializer {
         public double getMax() { return max; }
     }
 
+    // ==========================================
+    // MODULES (Mit standardmäßig aktiven Tracern!)
+    // ==========================================
     public static abstract class Module {
         private final String name;
         private boolean enabled = false;
@@ -224,7 +236,8 @@ public class ExampleModClient implements ClientModInitializer {
         public final NumberSetting blue;
         public final NumberSetting outlineAlpha = new NumberSetting("Outline Opacity", 255, 0, 255, 1);
         public final NumberSetting fillAlpha = new NumberSetting("Fill Opacity", 65, 0, 255, 1);
-        public final BooleanSetting tracers = new BooleanSetting("Tracers", false);
+        // Tracers (Linie zum Block/Spieler) standardmäßig auf TRUE!
+        public final BooleanSetting tracers = new BooleanSetting("Tracers", true);
 
         public Module(String name, double r, double g, double b, boolean includeRenderSettings) {
             this.name = name;
@@ -249,7 +262,7 @@ public class ExampleModClient implements ClientModInitializer {
                 cache.clear();
                 targets.clear();
             } else if (mc.level != null && mc.player != null) {
-                BlockScanner.scanAllEnabled(mc, MODULES);
+                BlockScanner.scanAllEnabled(mc, BLOCK_MODULES);
                 if (this instanceof ArmorStandESP a) {
                     BlockScanner.scanArmorStands(mc, a);
                 }
@@ -314,6 +327,42 @@ public class ExampleModClient implements ClientModInitializer {
     }
 
     // ==========================================
+    // NEU: PVP MODULE (Player Box + Hand Item + Totem Counter + Tracer)
+    // ==========================================
+    public static class PvpESP extends Module {
+        public final BooleanSetting showHandItem = new BooleanSetting("Show Hand Item", true);
+        public final BooleanSetting showTotems = new BooleanSetting("Show Totem Count", true);
+
+        public PvpESP() {
+            super("PvP", 255, 55, 55, true);
+            settings.add(1, showHandItem);
+            settings.add(2, showTotems);
+        }
+
+        public static int countPlayerTotems(Player p) {
+            int count = 0;
+            try {
+                int size = p.getInventory().getContainerSize();
+                for (int i = 0; i < size; i++) {
+                    ItemStack s = p.getInventory().getItem(i);
+                    if (!s.isEmpty() && s.is(Items.TOTEM_OF_UNDYING)) {
+                        count += s.getCount();
+                    }
+                }
+            } catch (Exception ignored) {}
+
+            // Falls der Server nur Mainhand/Offhand synchronisiert, prüfe beide Hände direkt:
+            if (count == 0) {
+                ItemStack main = p.getMainHandItem();
+                ItemStack off = p.getOffhandItem();
+                if (!main.isEmpty() && main.is(Items.TOTEM_OF_UNDYING)) count += main.getCount();
+                if (!off.isEmpty() && off.is(Items.TOTEM_OF_UNDYING)) count += off.getCount();
+            }
+            return count;
+        }
+    }
+
+    // ==========================================
     // PERSISTENT CACHE & ENTITY SCANNER
     // ==========================================
     public static class BlockScanner {
@@ -346,7 +395,6 @@ public class ExampleModClient implements ClientModInitializer {
             AABB searchBox = mc.player.getBoundingBox().inflate(256.0);
             List<ArmorStand> stands = mc.level.getEntitiesOfClass(ArmorStand.class, searchBox);
             for (ArmorStand stand : stands) {
-                // Ignore our own invisible Freecam camera entity!
                 if (stand == FREECAM.getCameraDummy()) continue;
 
                 BlockPos bp = stand.blockPosition();
@@ -354,7 +402,6 @@ public class ExampleModClient implements ClientModInitializer {
                 float oy = (float) (stand.getY() - bp.getY());
                 float oz = (float) (stand.getZ() - bp.getZ());
 
-                // Tall 0.5 x 1.975 hitbox around the ArmorStand
                 mod.targets.add(new RenderTarget(
                     bp,
                     ox - 0.25f, oy, oz - 0.25f,
@@ -393,8 +440,7 @@ public class ExampleModClient implements ClientModInitializer {
                 else if (m instanceof RespawnAnchorESP ra) { anchorMod = ra; anyEnabled = true; }
                 else if (m instanceof AmethystGeodeESP g) { geodeMod = g; anyEnabled = true; }
 
-                // Clean up broken blocks from persistent cache
-                if (!(m instanceof AmethystGeodeESP) && !(m instanceof ArmorStandESP) && !(m instanceof Freecam)) {
+                if (!(m instanceof AmethystGeodeESP) && !(m instanceof ArmorStandESP)) {
                     Iterator<Map.Entry<BlockPos, RenderTarget>> it = m.cache.entrySet().iterator();
                     while (it.hasNext()) {
                         BlockPos pos = it.next().getKey();
@@ -419,7 +465,6 @@ public class ExampleModClient implements ClientModInitializer {
                     LevelChunk chunk = mc.level.getChunkSource().getChunk(playerChunk.x + cx, playerChunk.z + cz, false);
                     if (chunk == null) continue;
 
-                    // 1. Scan BlockEntities
                     for (BlockEntity be : chunk.getBlockEntities().values()) {
                         BlockPos p = be.getBlockPos();
                         if (chestMod != null && be instanceof ChestBlockEntity) {
@@ -441,7 +486,6 @@ public class ExampleModClient implements ClientModInitializer {
                         }
                     }
 
-                    // 2. Scan Chunk Sections for Pistons, Respawn Anchors & Amethyst Geodes
                     if (pistonMod == null && anchorMod == null && geodeMod == null) continue;
 
                     LevelChunkSection[] sections = chunk.getSections();
@@ -513,7 +557,7 @@ public class ExampleModClient implements ClientModInitializer {
             }
 
             for (Module m : modules) {
-                if (m.isEnabled() && !(m instanceof AmethystGeodeESP) && !(m instanceof ArmorStandESP) && !(m instanceof Freecam)) {
+                if (m.isEnabled() && !(m instanceof AmethystGeodeESP) && !(m instanceof ArmorStandESP)) {
                     m.targets.clear();
                     m.targets.addAll(m.cache.values());
                 }
@@ -748,6 +792,9 @@ public class ExampleModClient implements ClientModInitializer {
         }
     }
 
+    // ==========================================
+    // 3D ESP & PVP RENDERER
+    // ==========================================
     public static class EspRenderer {
         private static final int[][] EDGES = {
             {0,1}, {1,3}, {3,2}, {2,0},
@@ -896,6 +943,165 @@ public class ExampleModClient implements ClientModInitializer {
             }
         }
 
+        // Rendert 3D-Boxen, Tracer-Linien, Hand-Items & Totem-Anzahl für alle Spieler
+        public static void renderPvpEsp(GuiGraphics context, Minecraft mc, PvpESP mod, int sw, int sh, float partialTick) {
+            if (mc.player == null || mc.level == null || mc.gameRenderer == null) return;
+
+            Camera cam = mc.gameRenderer.getMainCamera();
+            initReflection(cam, mc.gameRenderer);
+
+            Vec3 camPos = mc.player.getEyePosition(partialTick);
+            if (camPosMethod != null) {
+                try { camPos = (Vec3) camPosMethod.invoke(cam); } catch (Exception ignored) {}
+            }
+
+            Quaternionf invCamRot = null;
+            if (camRotMethod != null) {
+                try {
+                    Quaternionf q = (Quaternionf) camRotMethod.invoke(cam);
+                    invCamRot = new Quaternionf(q).conjugate();
+                } catch (Exception ignored) {}
+            }
+
+            double fov = mc.options.fov().get() * mc.player.getFieldOfViewModifier(true, partialTick);
+            if (getFovMethod != null) {
+                try {
+                    Object res = getFovMethod.invoke(mc.gameRenderer, cam, partialTick, true);
+                    if (res instanceof Number num) fov = num.doubleValue();
+                } catch (Exception ignored) {}
+            }
+
+            float f = (float) (1.0 / Math.tan(Math.toRadians(fov) / 2.0));
+            float aspect = (float) sw / (float) Math.max(1, sh);
+
+            float yaw = (float) Math.toRadians(mc.player.getViewYRot(partialTick));
+            float pitch = (float) Math.toRadians(mc.player.getViewXRot(partialTick));
+            float cosYaw = (float) Math.cos(yaw + Math.PI);
+            float sinYaw = (float) Math.sin(yaw + Math.PI);
+            float cosPitch = (float) Math.cos(pitch);
+            float sinPitch = (float) Math.sin(pitch);
+
+            int r = mod.red.getValue().intValue();
+            int g = mod.green.getValue().intValue();
+            int b = mod.blue.getValue().intValue();
+            int oA = mod.outlineAlpha.getValue().intValue();
+            int fA = mod.fillAlpha.getValue().intValue();
+            String renderMode = mod.mode.getValue();
+
+            int outlineColor = ((oA & 0xFF) << 24) | ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF);
+            int fillColor = ((fA & 0xFF) << 24) | ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF);
+
+            mod.targets.clear();
+
+            for (Player targetPlayer : mc.level.players()) {
+                if (targetPlayer == mc.player) continue;
+                mod.targets.add(new RenderTarget(targetPlayer.blockPosition()));
+
+                // Interpolierte Spieler-Position für flüssige 144+ FPS Boxen
+                double px = targetPlayer.xo + (targetPlayer.getX() - targetPlayer.xo) * partialTick;
+                double py = targetPlayer.yo + (targetPlayer.getY() - targetPlayer.yo) * partialTick;
+                double pz = targetPlayer.zo + (targetPlayer.getZ() - targetPlayer.zo) * partialTick;
+
+                float halfW = 0.35f;
+                float height = (float) targetPlayer.getBbHeight();
+
+                float[] sx = new float[8];
+                float[] sy = new float[8];
+                boolean allVisible = true;
+                float minScreenY = Float.MAX_VALUE;
+
+                for (int i = 0; i < 8; i++) {
+                    float bx = (i & 1) != 0 ? halfW : -halfW;
+                    float by = (i & 2) != 0 ? height : 0.0f;
+                    float bz = (i & 4) != 0 ? halfW : -halfW;
+
+                    float wx = (float) (px + bx - camPos.x);
+                    float wy = (float) (py + by - camPos.y);
+                    float wz = (float) (pz + bz - camPos.z);
+
+                    float rx, ry, finalZ;
+                    if (invCamRot != null) {
+                        Vector3f v = new Vector3f(wx, wy, wz).rotate(invCamRot);
+                        rx = v.x;
+                        ry = v.y;
+                        finalZ = v.z;
+                    } else {
+                        rx = wx * cosYaw + wz * sinYaw;
+                        float rz = -wx * sinYaw + wz * cosYaw;
+                        ry = wy * cosPitch - rz * sinPitch;
+                        finalZ = wy * sinPitch + rz * cosPitch;
+                    }
+
+                    if (finalZ >= -0.05f) {
+                        allVisible = false;
+                        break;
+                    }
+
+                    float ndcX = (rx * (f / aspect)) / (-finalZ);
+                    float ndcY = (ry * f) / (-finalZ);
+
+                    sx[i] = (ndcX + 1.0f) * 0.5f * sw;
+                    sy[i] = (1.0f - ndcY) * 0.5f * sh;
+                    minScreenY = Math.min(minScreenY, sy[i]);
+                }
+
+                if (!allVisible) continue;
+
+                if (renderMode.equals("Fill") || renderMode.equals("Both")) {
+                    draw3DFaceFill(context, sx, sy, fillColor, sw, sh);
+                }
+
+                if (renderMode.equals("Outline") || renderMode.equals("Both")) {
+                    for (int[] edge : EDGES) {
+                        drawCrispLine(context, Math.round(sx[edge[0]]), Math.round(sy[edge[0]]),
+                                      Math.round(sx[edge[1]]), Math.round(sy[edge[1]]), outlineColor, sw, sh);
+                    }
+                }
+
+                int centerX = Math.round((sx[0] + sx[7]) * 0.5f);
+                int centerY = Math.round((sy[0] + sy[7]) * 0.5f);
+
+                // Tracer-Linie zum Spieler
+                if (mod.tracers.getValue()) {
+                    drawCrispLine(context, sw / 2, sh / 2, centerX, centerY, outlineColor, sw, sh);
+                }
+
+                // HUD-Tag über dem Spieler: Name + Gehaltenes Item + Totem-Anzahl
+                int tagY = Math.max(12, Math.round(minScreenY) - 24);
+                int dist = (int) Math.round(mc.player.distanceTo(targetPlayer));
+                String nameLine = "§c" + targetPlayer.getName().getString() + " §7[" + dist + "m]";
+
+                ItemStack mainHand = targetPlayer.getMainHandItem();
+                ItemStack offHand = targetPlayer.getOffhandItem();
+                String handName = mainHand.isEmpty() ? "Empty" : mainHand.getHoverName().getString();
+                if (!offHand.isEmpty() && !offHand.is(Items.TOTEM_OF_UNDYING)) {
+                    handName += " + " + offHand.getHoverName().getString();
+                }
+
+                int totems = PvpESP.countPlayerTotems(targetPlayer);
+
+                StringBuilder infoLine = new StringBuilder();
+                if (mod.showHandItem.getValue()) {
+                    infoLine.append("§fHand: §b").append(handName);
+                }
+                if (mod.showTotems.getValue()) {
+                    if (infoLine.length() > 0) infoLine.append(" §7| ");
+                    infoLine.append("§eTotems: §6").append(totems);
+                }
+
+                int nameW = mc.font.width(nameLine);
+                context.fill(centerX - nameW / 2 - 3, tagY - 2, centerX + nameW / 2 + 3, tagY + 9, 0xAA08080C);
+                context.drawString(mc.font, nameLine, centerX - nameW / 2, tagY, 0xFFFFFFFF, true);
+
+                if (infoLine.length() > 0) {
+                    String infoStr = infoLine.toString();
+                    int infoW = mc.font.width(infoStr);
+                    context.fill(centerX - infoW / 2 - 3, tagY + 10, centerX + infoW / 2 + 3, tagY + 21, 0xAA08080C);
+                    context.drawString(mc.font, infoStr, centerX - infoW / 2, tagY + 11, 0xFFFFFFFF, true);
+                }
+            }
+        }
+
         private static void draw3DFaceFill(GuiGraphics context, float[] sx, float[] sy, int color, int sw, int sh) {
             int[][] faces = {
                 {0, 1, 3, 2},
@@ -946,18 +1152,17 @@ public class ExampleModClient implements ClientModInitializer {
     }
 
     // ==========================================
-    // TWO-COLUMN CLICKGUI SCREEN
+    // REDESIGNED CLICKGUI (Block ESP Tab + PvP Tab)
     // ==========================================
     public static class ClickGuiScreen extends Screen {
-        private final List<Module> modules;
+        private static boolean blockEspTabExpanded = true;
         private NumberSetting draggingSlider = null;
-        private final int col1X = 30, col2X = 240, panelY = 25, panelWidth = 195;
+        private final int col1X = 30, col2X = 250, panelY = 25, panelWidth = 200;
         private boolean leftWasDown = false;
         private boolean rightWasDown = false;
 
-        public ClickGuiScreen(List<Module> modules) {
+        public ClickGuiScreen() {
             super(Component.literal("ClickGUI"));
-            this.modules = modules;
         }
 
         @Override
@@ -983,81 +1188,118 @@ public class ExampleModClient implements ClientModInitializer {
             leftWasDown = leftDown;
             rightWasDown = rightDown;
 
-            for (Module mod : modules) {
+            for (Module mod : BLOCK_MODULES) {
                 if (mod.isEnabled() && !mod.targets.isEmpty()) {
                     EspRenderer.renderModuleEsp(context, mc, mod, this.width, this.height, delta);
                 }
             }
+            if (PVP_ESP.isEnabled()) {
+                EspRenderer.renderPvpEsp(context, mc, PVP_ESP, this.width, this.height, delta);
+            }
 
-            // Column 1: Storage & Redstone ESP (First 7 modules)
-            renderColumn(context, "✦ STORAGE & REDSTONE", modules.subList(0, 7), col1X, panelY, mouseX, mouseY);
+            // =====================================================
+            // LINKER HAUPTPUNKT: "BLOCK ESP" (Aufklappbares Hauptmenü)
+            // =====================================================
+            boolean headerHovered = isHovered(mouseX, mouseY, col1X, panelY, panelWidth, 22);
+            context.fill(col1X, panelY - 2, col1X + panelWidth, panelY, 0xFF8A2BE2);
+            context.fill(col1X, panelY, col1X + panelWidth, panelY + 22, headerHovered ? 0xF0221C35 : 0xF014141D);
 
-            // Column 2: World, Entities & Client (Remaining 5 modules)
-            renderColumn(context, "✦ WORLD & UTILITY", modules.subList(7, modules.size()), col2X, panelY, mouseX, mouseY);
-        }
+            long activeBlocks = BLOCK_MODULES.stream().filter(Module::isEnabled).count();
+            String blockHeaderTitle = "✦ BLOCK ESP [" + activeBlocks + "/" + BLOCK_MODULES.size() + "]";
+            context.drawString(this.font, blockHeaderTitle, col1X + 8, panelY + 7, 0xFFFFFFFF, true);
+            context.drawString(this.font, blockEspTabExpanded ? "▾" : "▸", col1X + panelWidth - 14, panelY + 7, 0xFFD8B4FE, true);
 
-        private void renderColumn(GuiGraphics context, String title, List<Module> colModules, int x, int startY, int mouseX, int mouseY) {
-            context.fill(x, startY - 2, x + panelWidth, startY, 0xFF8A2BE2);
-            context.fill(x, startY, x + panelWidth, startY + 20, 0xF014141D);
-            context.drawString(this.font, title, x + 8, startY + 6, 0xFFFFFFFF, true);
-
-            int currentY = startY + 20;
-            for (Module mod : colModules) {
-                boolean hovered = isHovered(mouseX, mouseY, x, currentY, panelWidth, 18);
-                int bgColor = mod.isEnabled() ? 0xE6251B38 : (hovered ? 0xE61E1E2A : 0xE6161620);
-                context.fill(x, currentY, x + panelWidth, currentY + 18, bgColor);
-
-                if (mod.isEnabled()) {
-                    int sideBarColor = (0xFF << 24)
-                        | ((mod.red.getValue().intValue() & 0xFF) << 16)
-                        | ((mod.green.getValue().intValue() & 0xFF) << 8)
-                        | (mod.blue.getValue().intValue() & 0xFF);
-                    context.fill(x, currentY, x + 3, currentY + 18, sideBarColor);
-                }
-
-                String label = mod.getName() + (mod.isEnabled() && !(mod instanceof Freecam) ? " [" + mod.targets.size() + "]" : "");
-                context.drawString(this.font, label, x + 8, currentY + 5, mod.isEnabled() ? 0xFFD8B4FE : 0xFFAAAAAA, true);
-                context.drawString(this.font, mod.isExpanded() ? "▾" : "▸", x + panelWidth - 12, currentY + 5, 0xFF888888, true);
-                currentY += 18;
-
-                if (mod.isExpanded()) {
-                    for (Setting<?> setting : mod.getSettings()) {
-                        context.fill(x, currentY, x + panelWidth, currentY + 16, 0xF0101016);
-
-                        if (setting instanceof BooleanSetting boolSet) {
-                            context.drawString(this.font, boolSet.getName(), x + 12, currentY + 4, 0xFFCCCCCC, true);
-                            int boxColor = boolSet.getValue() ? 0xFF8A2BE2 : 0xFF2A2A35;
-                            context.fill(x + panelWidth - 18, currentY + 4, x + panelWidth - 10, currentY + 12, boxColor);
-                        } else if (setting instanceof ModeSetting modeSet) {
-                            context.drawString(this.font, modeSet.getName() + ": " + modeSet.getValue(), x + 12, currentY + 4, 0xFFB39DDB, true);
-                        } else if (setting instanceof NumberSetting numSet) {
-                            if (draggingSlider == numSet) {
-                                double percent = Math.max(0, Math.min(1, (double) (mouseX - (x + 10)) / (panelWidth - 20)));
-                                numSet.setClampedValue(numSet.getMin() + (numSet.getMax() - numSet.getMin()) * percent);
-                            }
-                            double pct = (numSet.getValue() - numSet.getMin()) / (numSet.getMax() - numSet.getMin());
-                            int barWidth = (int) ((panelWidth - 20) * pct);
-
-                            context.fill(x + 10, currentY + 12, x + panelWidth - 10, currentY + 14, 0xFF252530);
-                            context.fill(x + 10, currentY + 12, x + 10 + barWidth, currentY + 14, 0xFF8A2BE2);
-                            String valStr = numSet.step < 1.0
-                                ? String.format("%.1f", numSet.getValue())
-                                : String.valueOf(numSet.getValue().intValue());
-                            context.drawString(this.font, numSet.getName() + ": " + valStr, x + 12, currentY + 2, 0xFFCCCCCC, true);
-                        }
-                        currentY += 16;
-                    }
+            if (blockEspTabExpanded) {
+                int currentY = panelY + 22;
+                for (Module mod : BLOCK_MODULES) {
+                    currentY = renderModuleRow(context, mod, col1X, currentY, mouseX, mouseY, true);
                 }
             }
+
+            // =====================================================
+            // RECHTER HAUPTPUNKT: "PVP & MOVEMENT" (PvP + Freecam)
+            // =====================================================
+            context.fill(col2X, panelY - 2, col2X + panelWidth, panelY, 0xFFFF3737);
+            context.fill(col2X, panelY, col2X + panelWidth, panelY + 22, 0xF014141D);
+            context.drawString(this.font, "⚔ PVP & UTILITY", col2X + 8, panelY + 7, 0xFFFFFFFF, true);
+
+            int rightY = panelY + 22;
+            rightY = renderModuleRow(context, PVP_ESP, col2X, rightY, mouseX, mouseY, false);
+            renderModuleRow(context, FREECAM, col2X, rightY, mouseX, mouseY, false);
+        }
+
+        private int renderModuleRow(GuiGraphics context, Module mod, int x, int currentY, int mouseX, int mouseY, boolean isSubItem) {
+            boolean hovered = isHovered(mouseX, mouseY, x, currentY, panelWidth, 18);
+            int bgColor = mod.isEnabled() ? 0xE6251B38 : (hovered ? 0xE61E1E2A : 0xE6161620);
+            context.fill(x, currentY, x + panelWidth, currentY + 18, bgColor);
+
+            // Dezente Einrückungs-Linie für Unterpunkte von Block ESP
+            if (isSubItem) {
+                context.fill(x, currentY, x + 2, currentY + 18, 0x668A2BE2);
+            }
+
+            if (mod.isEnabled()) {
+                int sideBarColor = (0xFF << 24)
+                    | ((mod.red.getValue().intValue() & 0xFF) << 16)
+                    | ((mod.green.getValue().intValue() & 0xFF) << 8)
+                    | (mod.blue.getValue().intValue() & 0xFF);
+                context.fill(x, currentY, x + 3, currentY + 18, sideBarColor);
+            }
+
+            int textOffset = isSubItem ? 12 : 8;
+            String prefix = isSubItem ? "• " : "";
+            String label = prefix + mod.getName() + (mod.isEnabled() && !(mod instanceof Freecam) ? " [" + mod.targets.size() + "]" : "");
+            context.drawString(this.font, label, x + textOffset, currentY + 5, mod.isEnabled() ? 0xFFD8B4FE : 0xFFCCCCCC, true);
+            context.drawString(this.font, mod.isExpanded() ? "▾" : "▸", x + panelWidth - 12, currentY + 5, 0xFF888888, true);
+            currentY += 18;
+
+            if (mod.isExpanded()) {
+                for (Setting<?> setting : mod.getSettings()) {
+                    context.fill(x, currentY, x + panelWidth, currentY + 16, 0xF0101016);
+
+                    if (setting instanceof BooleanSetting boolSet) {
+                        context.drawString(this.font, boolSet.getName(), x + 14, currentY + 4, 0xFFCCCCCC, true);
+                        int boxColor = boolSet.getValue() ? 0xFF8A2BE2 : 0xFF2A2A35;
+                        context.fill(x + panelWidth - 18, currentY + 4, x + panelWidth - 10, currentY + 12, boxColor);
+                    } else if (setting instanceof ModeSetting modeSet) {
+                        context.drawString(this.font, modeSet.getName() + ": " + modeSet.getValue(), x + 14, currentY + 4, 0xFFB39DDB, true);
+                    } else if (setting instanceof NumberSetting numSet) {
+                        if (draggingSlider == numSet) {
+                            double percent = Math.max(0, Math.min(1, (double) (mouseX - (x + 12)) / (panelWidth - 24)));
+                            numSet.setClampedValue(numSet.getMin() + (numSet.getMax() - numSet.getMin()) * percent);
+                        }
+                        double pct = (numSet.getValue() - numSet.getMin()) / (numSet.getMax() - numSet.getMin());
+                        int barWidth = (int) ((panelWidth - 24) * pct);
+
+                        context.fill(x + 12, currentY + 12, x + panelWidth - 12, currentY + 14, 0xFF252530);
+                        context.fill(x + 12, currentY + 12, x + 12 + barWidth, currentY + 14, 0xFF8A2BE2);
+                        String valStr = numSet.step < 1.0
+                            ? String.format("%.1f", numSet.getValue())
+                            : String.valueOf(numSet.getValue().intValue());
+                        context.drawString(this.font, numSet.getName() + ": " + valStr, x + 14, currentY + 2, 0xFFCCCCCC, true);
+                    }
+                    currentY += 16;
+                }
+            }
+            return currentY;
         }
 
         private void handleMouseClick(double mouseX, double mouseY, int button) {
-            if (checkColumnClick(modules.subList(0, 7), col1X, panelY, mouseX, mouseY, button)) return;
-            checkColumnClick(modules.subList(7, modules.size()), col2X, panelY, mouseX, mouseY, button);
+            // Klick auf den Hauptpunkt "BLOCK ESP" klappt alle Unterpunkte ein/aus
+            if (isHovered(mouseX, mouseY, col1X, panelY, panelWidth, 22)) {
+                blockEspTabExpanded = !blockEspTabExpanded;
+                return;
+            }
+
+            if (blockEspTabExpanded) {
+                if (checkColumnClick(BLOCK_MODULES, col1X, panelY + 22, mouseX, mouseY, button)) return;
+            }
+
+            checkColumnClick(List.of(PVP_ESP, FREECAM), col2X, panelY + 22, mouseX, mouseY, button);
         }
 
         private boolean checkColumnClick(List<Module> colModules, int x, int startY, double mouseX, double mouseY, int button) {
-            int currentY = startY + 20;
+            int currentY = startY;
             for (Module mod : colModules) {
                 if (isHovered(mouseX, mouseY, x, currentY, panelWidth, 18)) {
                     if (button == 0) mod.toggle();
