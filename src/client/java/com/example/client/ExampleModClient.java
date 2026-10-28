@@ -78,7 +78,6 @@ public class ExampleModClient implements ClientModInitializer {
 
     @Override
     public void onInitializeClient() {
-        // 1. START_CLIENT_TICK: Keybinds prüfen, danach Spieler einfrieren falls Freecam aktiv
         ClientTickEvents.START_CLIENT_TICK.register(client -> {
             if (client.getWindow() != null) {
                 long window = client.getWindow().handle();
@@ -106,7 +105,6 @@ public class ExampleModClient implements ClientModInitializer {
             }
         });
 
-        // 2. END_CLIENT_TICK: Scanner & Freecam Bewegung
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             if (client.getWindow() == null) return;
             long window = client.getWindow().handle();
@@ -118,6 +116,7 @@ public class ExampleModClient implements ClientModInitializer {
                     m.targets.clear();
                 }
                 STASH_FINDER.alertedChunks.clear();
+                STASH_FINDER.stashBoxes.clear();
             }
 
             if (client.level != null && client.player != null) {
@@ -132,6 +131,9 @@ public class ExampleModClient implements ClientModInitializer {
                 if (MINECART_ESP.isEnabled()) {
                     BlockScanner.scanMinecarts(client, MINECART_ESP);
                 }
+                if (STASH_FINDER.isEnabled()) {
+                    STASH_FINDER.updateStashBoxes(client.player);
+                }
             }
 
             if (FREECAM.isEnabled()) {
@@ -139,7 +141,6 @@ public class ExampleModClient implements ClientModInitializer {
             }
         });
 
-        // 3. HUD Render: 3D Block ESP + PvP Player ESP + Stash Bottom Pop-up
         HudRenderCallback.EVENT.register((context, tickCounter) -> {
             Minecraft mc = Minecraft.getInstance();
             if (mc.level == null || mc.player == null || mc.options.hideGui) return;
@@ -162,6 +163,10 @@ public class ExampleModClient implements ClientModInitializer {
 
                 if (PVP_ESP.isEnabled()) {
                     EspRenderer.renderPvpEsp(context, mc, PVP_ESP, sw, sh, partialTick);
+                }
+
+                if (STASH_FINDER.isEnabled() && !STASH_FINDER.targets.isEmpty()) {
+                    EspRenderer.renderModuleEsp(context, mc, STASH_FINDER, sw, sh, partialTick);
                 }
             }
 
@@ -236,9 +241,6 @@ public class ExampleModClient implements ClientModInitializer {
         public double getMax() { return max; }
     }
 
-    // ==========================================
-    // MODULES
-    // ==========================================
     public static abstract class Module {
         private final String name;
         private boolean enabled = false;
@@ -352,11 +354,13 @@ public class ExampleModClient implements ClientModInitializer {
     public static class PvpESP extends Module {
         public final BooleanSetting showHandItem = new BooleanSetting("Show Hand Item", true);
         public final BooleanSetting showTotems = new BooleanSetting("Show Totem Count", true);
+        public final BooleanSetting showArmor = new BooleanSetting("Show Armor & HP", true);
 
         public PvpESP() {
             super("PvP", 255, 55, 55, true);
             settings.add(1, showHandItem);
             settings.add(2, showTotems);
+            settings.add(3, showArmor);
         }
 
         public static int countPlayerTotems(Player p) {
@@ -379,19 +383,63 @@ public class ExampleModClient implements ClientModInitializer {
             }
             return count;
         }
+
+        public static int calculateArmorPercent(Player p) {
+            int totalMax = 0;
+            int totalCurrent = 0;
+            for (ItemStack armor : p.getArmorSlots()) {
+                if (!armor.isEmpty() && armor.isDamageableItem()) {
+                    totalMax += armor.getMaxDamage();
+                    totalCurrent += (armor.getMaxDamage() - armor.getDamageValue());
+                }
+            }
+            if (totalMax == 0) return 100;
+            return (int) Math.round(((double) totalCurrent / totalMax) * 100.0);
+        }
     }
 
+    // ==========================================
+    // STASH FINDER (Mit dauerhafter Box & Tracer bis zur Nähe)
+    // ==========================================
     public static class StashFinder extends Module {
         public final NumberSetting minBlocks = new NumberSetting("Min Containers", 15, 5, 100, 1);
         public final Set<Long> alertedChunks = new HashSet<>();
+        public final Map<Long, BlockPos> stashBoxes = new HashMap<>();
 
         private String popupTitle = "";
         private String popupSub = "";
         private long popupEndTime = 0;
 
         public StashFinder() {
-            super("Stash Finder", 255, 215, 0, false);
+            super("Stash Finder", 255, 215, 0, true);
             settings.add(minBlocks);
+        }
+
+        public void registerStash(long chunkKey, BlockPos centerPos) {
+            if (!stashBoxes.containsKey(chunkKey)) {
+                stashBoxes.put(chunkKey, centerPos);
+            }
+        }
+
+        public void updateStashBoxes(Player player) {
+            targets.clear();
+            Iterator<Map.Entry<Long, BlockPos>> it = stashBoxes.entrySet().iterator();
+            while (it.hasNext()) {
+                Map.Entry<Long, BlockPos> entry = it.next();
+                BlockPos pos = entry.getValue();
+
+                // Wenn man nah genug ist (unter 24 Blöcke), verschwindet die Stash-Box, um den Blick freizugeben
+                if (pos.closerThan(player.blockPosition(), 24.0)) {
+                    continue;
+                }
+
+                // Box um den Stash-Mittelpunkt (Größe 4x3x4)
+                targets.add(new RenderTarget(
+                    pos,
+                    -2.0f, 0.0f, -2.0f,
+                    3.0f, 3.0f, 3.0f
+                ));
+            }
         }
 
         public void triggerAlert(int x, int z, int totalContainers, int chests, int barrels, int shulkers, int hoppers, int carts) {
@@ -429,7 +477,7 @@ public class ExampleModClient implements ClientModInitializer {
     }
 
     // ==========================================
-    // PERSISTENT CACHE, ENTITY & STASH SCANNER
+    // PERSISTENT CACHE & SCANNER
     // ==========================================
     public static class BlockScanner {
         private static Method minYMethod = null;
@@ -481,7 +529,6 @@ public class ExampleModClient implements ClientModInitializer {
             }
         }
 
-        // Scannt Chest- und Hopper-Minecarts über EntityType (100% 1.21.11 kompatibel)
         public static void scanMinecarts(Minecraft mc, MinecartESP mod) {
             mod.targets.clear();
             if (mc.level == null || mc.player == null) return;
@@ -533,7 +580,7 @@ public class ExampleModClient implements ClientModInitializer {
                 else if (m instanceof RespawnAnchorESP ra) { anchorMod = ra; anyEnabled = true; }
                 else if (m instanceof AmethystGeodeESP g) { geodeMod = g; anyEnabled = true; }
 
-                if (!(m instanceof AmethystGeodeESP) && !(m instanceof ArmorStandESP) && !(m instanceof MinecartESP)) {
+                if (!(m instanceof AmethystGeodeESP) && !(m instanceof ArmorStandESP) && !(m instanceof MinecartESP) && !(m instanceof StashFinder)) {
                     Iterator<Map.Entry<BlockPos, RenderTarget>> it = m.cache.entrySet().iterator();
                     while (it.hasNext()) {
                         BlockPos pos = it.next().getKey();
@@ -568,9 +615,14 @@ public class ExampleModClient implements ClientModInitializer {
                     if (chunk == null) continue;
 
                     int cChests = 0, cBarrels = 0, cShulkers = 0, cHoppers = 0;
+                    long sumX = 0, sumY = 0, sumZ = 0;
+                    int containerCountForCenter = 0;
 
                     for (BlockEntity be : chunk.getBlockEntities().values()) {
                         BlockPos p = be.getBlockPos();
+                        sumX += p.getX(); sumY += p.getY(); sumZ += p.getZ();
+                        containerCountForCenter++;
+
                         if (be instanceof ChestBlockEntity) {
                             cChests++;
                             if (chestMod != null) chestMod.cacheTarget(new RenderTarget(p, 0.0625f, 0.0f, 0.0625f, 0.9375f, 0.875f, 0.9375f));
@@ -599,11 +651,17 @@ public class ExampleModClient implements ClientModInitializer {
                         long chunkKey = chunk.getPos().toLong();
                         int cCarts = cartsPerChunk.getOrDefault(chunkKey, 0);
                         int total = cChests + cBarrels + cShulkers + cHoppers + cCarts;
-                        if (total >= STASH_FINDER.minBlocks.getValue().intValue() && !STASH_FINDER.alertedChunks.contains(chunkKey)) {
-                            STASH_FINDER.alertedChunks.add(chunkKey);
-                            int centerX = chunk.getPos().getMiddleBlockX();
-                            int centerZ = chunk.getPos().getMiddleBlockZ();
-                            STASH_FINDER.triggerAlert(centerX, centerZ, total, cChests, cBarrels, cShulkers, cHoppers, cCarts);
+                        if (total >= STASH_FINDER.minBlocks.getValue().intValue()) {
+                            if (containerCountForCenter > 0) {
+                                BlockPos centerPos = new BlockPos((int)(sumX / containerCountForCenter), (int)(sumY / containerCountForCenter), (int)(sumZ / containerCountForCenter));
+                                STASH_FINDER.registerStash(chunkKey, centerPos);
+                            }
+                            if (!STASH_FINDER.alertedChunks.contains(chunkKey)) {
+                                STASH_FINDER.alertedChunks.add(chunkKey);
+                                int centerX = chunk.getPos().getMiddleBlockX();
+                                int centerZ = chunk.getPos().getMiddleBlockZ();
+                                STASH_FINDER.triggerAlert(centerX, centerZ, total, cChests, cBarrels, cShulkers, cHoppers, cCarts);
+                            }
                         }
                     }
 
@@ -1196,6 +1254,8 @@ public class ExampleModClient implements ClientModInitializer {
                 }
 
                 int totems = PvpESP.countPlayerTotems(targetPlayer);
+                int armorPct = PvpESP.calculateArmorPercent(targetPlayer);
+                float hp = targetPlayer.getHealth();
 
                 StringBuilder infoLine = new StringBuilder();
                 if (mod.showHandItem.getValue()) {
@@ -1204,6 +1264,11 @@ public class ExampleModClient implements ClientModInitializer {
                 if (mod.showTotems.getValue()) {
                     if (infoLine.length() > 0) infoLine.append(" §7| ");
                     infoLine.append("§eTotems: §6").append(totems);
+                }
+
+                StringBuilder armorLine = new StringBuilder();
+                if (mod.showArmor.getValue()) {
+                    armorLine.append("§c❤ ").append(String.format("%.1f", hp)).append(" §7| §aArmor: ").append(armorPct).append("%");
                 }
 
                 int nameW = mc.font.width(nameLine);
@@ -1215,6 +1280,14 @@ public class ExampleModClient implements ClientModInitializer {
                     int infoW = mc.font.width(infoStr);
                     context.fill(centerX - infoW / 2 - 3, tagY + 10, centerX + infoW / 2 + 3, tagY + 21, 0xAA08080C);
                     context.drawString(mc.font, infoStr, centerX - infoW / 2, tagY + 11, 0xFFFFFFFF, true);
+                    tagY += 11;
+                }
+
+                if (armorLine.length() > 0) {
+                    String armorStr = armorLine.toString();
+                    int armorW = mc.font.width(armorStr);
+                    context.fill(centerX - armorW / 2 - 3, tagY + 10, centerX + armorW / 2 + 3, tagY + 21, 0xAA08080C);
+                    context.drawString(mc.font, armorStr, centerX - armorW / 2, tagY + 11, 0xFFFFFFFF, true);
                 }
             }
         }
@@ -1312,6 +1385,9 @@ public class ExampleModClient implements ClientModInitializer {
             }
             if (PVP_ESP.isEnabled()) {
                 EspRenderer.renderPvpEsp(context, mc, PVP_ESP, this.width, this.height, delta);
+            }
+            if (STASH_FINDER.isEnabled() && !STASH_FINDER.targets.isEmpty()) {
+                EspRenderer.renderModuleEsp(context, mc, STASH_FINDER, this.width, this.height, delta);
             }
 
             boolean headerHovered = isHovered(mouseX, mouseY, col1X, panelY, panelWidth, 22);
