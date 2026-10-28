@@ -15,6 +15,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.entity.decoration.ArmorStand;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.entity.vehicle.AbstractMinecartContainer;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.ChunkPos;
@@ -33,14 +34,18 @@ import org.lwjgl.glfw.GLFW;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public class ExampleModClient implements ClientModInitializer {
     public static final Freecam FREECAM = new Freecam();
     public static final ArmorStandESP ARMOR_STAND_ESP = new ArmorStandESP();
+    public static final MinecartESP MINECART_ESP = new MinecartESP();
     public static final PvpESP PVP_ESP = new PvpESP();
+    public static final StashFinder STASH_FINDER = new StashFinder();
 
     public static final List<Module> BLOCK_MODULES = List.of(
         new ChestESP(),
@@ -53,6 +58,7 @@ public class ExampleModClient implements ClientModInitializer {
         new SpawnerESP(),
         new RespawnAnchorESP(),
         ARMOR_STAND_ESP,
+        MINECART_ESP,
         new AmethystGeodeESP()
     );
 
@@ -60,6 +66,7 @@ public class ExampleModClient implements ClientModInitializer {
     static {
         MODULES.addAll(BLOCK_MODULES);
         MODULES.add(PVP_ESP);
+        MODULES.add(STASH_FINDER);
         MODULES.add(FREECAM);
     }
 
@@ -109,6 +116,7 @@ public class ExampleModClient implements ClientModInitializer {
                     m.cache.clear();
                     m.targets.clear();
                 }
+                STASH_FINDER.alertedChunks.clear();
             }
 
             if (client.level != null && client.player != null) {
@@ -120,6 +128,9 @@ public class ExampleModClient implements ClientModInitializer {
                 if (ARMOR_STAND_ESP.isEnabled()) {
                     BlockScanner.scanArmorStands(client, ARMOR_STAND_ESP);
                 }
+                if (MINECART_ESP.isEnabled()) {
+                    BlockScanner.scanMinecarts(client, MINECART_ESP);
+                }
             }
 
             if (FREECAM.isEnabled()) {
@@ -127,7 +138,7 @@ public class ExampleModClient implements ClientModInitializer {
             }
         });
 
-        // 3. HUD Render: 3D Block ESP + PvP Player ESP + Tracer-Linien
+        // 3. HUD Render: 3D Block ESP + PvP Player ESP + Stash Bottom Pop-up
         HudRenderCallback.EVENT.register((context, tickCounter) -> {
             Minecraft mc = Minecraft.getInstance();
             if (mc.level == null || mc.player == null || mc.options.hideGui) return;
@@ -136,20 +147,26 @@ public class ExampleModClient implements ClientModInitializer {
                 FREECAM.syncRotationFrame(mc);
             }
 
-            if (mc.screen instanceof ClickGuiScreen) return;
-
-            float partialTick = tickCounter.getGameTimeDeltaPartialTick(false);
             int sw = mc.getWindow().getGuiScaledWidth();
             int sh = mc.getWindow().getGuiScaledHeight();
 
-            for (Module mod : BLOCK_MODULES) {
-                if (mod.isEnabled() && !mod.targets.isEmpty()) {
-                    EspRenderer.renderModuleEsp(context, mc, mod, sw, sh, partialTick);
+            if (!(mc.screen instanceof ClickGuiScreen)) {
+                float partialTick = tickCounter.getGameTimeDeltaPartialTick(false);
+
+                for (Module mod : BLOCK_MODULES) {
+                    if (mod.isEnabled() && !mod.targets.isEmpty()) {
+                        EspRenderer.renderModuleEsp(context, mc, mod, sw, sh, partialTick);
+                    }
+                }
+
+                if (PVP_ESP.isEnabled()) {
+                    EspRenderer.renderPvpEsp(context, mc, PVP_ESP, sw, sh, partialTick);
                 }
             }
 
-            if (PVP_ESP.isEnabled()) {
-                EspRenderer.renderPvpEsp(context, mc, PVP_ESP, sw, sh, partialTick);
+            // Stash Finder Pop-up unten am Bildschirm rendern
+            if (STASH_FINDER.isEnabled()) {
+                STASH_FINDER.renderBottomPopup(context, mc, sw, sh);
             }
         });
 
@@ -220,7 +237,7 @@ public class ExampleModClient implements ClientModInitializer {
     }
 
     // ==========================================
-    // MODULES (Mit standardmäßig aktiven Tracern!)
+    // MODULES
     // ==========================================
     public static abstract class Module {
         private final String name;
@@ -236,7 +253,6 @@ public class ExampleModClient implements ClientModInitializer {
         public final NumberSetting blue;
         public final NumberSetting outlineAlpha = new NumberSetting("Outline Opacity", 255, 0, 255, 1);
         public final NumberSetting fillAlpha = new NumberSetting("Fill Opacity", 65, 0, 255, 1);
-        // Tracers (Linie zum Block/Spieler) standardmäßig auf TRUE!
         public final BooleanSetting tracers = new BooleanSetting("Tracers", true);
 
         public Module(String name, double r, double g, double b, boolean includeRenderSettings) {
@@ -265,6 +281,9 @@ public class ExampleModClient implements ClientModInitializer {
                 BlockScanner.scanAllEnabled(mc, BLOCK_MODULES);
                 if (this instanceof ArmorStandESP a) {
                     BlockScanner.scanArmorStands(mc, a);
+                }
+                if (this instanceof MinecartESP m) {
+                    BlockScanner.scanMinecarts(mc, m);
                 }
             }
             if (mc.player != null) {
@@ -322,13 +341,15 @@ public class ExampleModClient implements ClientModInitializer {
         public ArmorStandESP() { super("Armor Stands", 50, 255, 160, true); }
     }
 
+    // NEU: Chest & Hopper Minecart ESP im Block ESP Dropdown
+    public static class MinecartESP extends Module {
+        public MinecartESP() { super("Minecarts (Chest/Hopper)", 255, 140, 0, true); }
+    }
+
     public static class AmethystGeodeESP extends Module {
         public AmethystGeodeESP() { super("Amethyst Geode", 180, 85, 255, true); }
     }
 
-    // ==========================================
-    // NEU: PVP MODULE (Player Box + Hand Item + Totem Counter + Tracer)
-    // ==========================================
     public static class PvpESP extends Module {
         public final BooleanSetting showHandItem = new BooleanSetting("Show Hand Item", true);
         public final BooleanSetting showTotems = new BooleanSetting("Show Totem Count", true);
@@ -351,7 +372,6 @@ public class ExampleModClient implements ClientModInitializer {
                 }
             } catch (Exception ignored) {}
 
-            // Falls der Server nur Mainhand/Offhand synchronisiert, prüfe beide Hände direkt:
             if (count == 0) {
                 ItemStack main = p.getMainHandItem();
                 ItemStack off = p.getOffhandItem();
@@ -363,7 +383,58 @@ public class ExampleModClient implements ClientModInitializer {
     }
 
     // ==========================================
-    // PERSISTENT CACHE & ENTITY SCANNER
+    // NEU: STASH FINDER (Mit Pop-up unten am Bildschirm statt im Chat!)
+    // ==========================================
+    public static class StashFinder extends Module {
+        public final NumberSetting minBlocks = new NumberSetting("Min Containers", 15, 5, 100, 1);
+        public final Set<Long> alertedChunks = new HashSet<>();
+
+        private String popupTitle = "";
+        private String popupSub = "";
+        private long popupEndTime = 0;
+
+        public StashFinder() {
+            super("Stash Finder", 255, 215, 0, false);
+            settings.add(minBlocks);
+        }
+
+        public void triggerAlert(int x, int z, int totalContainers, int chests, int barrels, int shulkers, int hoppers, int carts) {
+            this.popupTitle = "⚠ STASH FOUND AT X: " + x + " Z: " + z + " (" + totalContainers + " Containers)";
+            StringBuilder details = new StringBuilder();
+            if (chests > 0) details.append("Chests: ").append(chests).append("  ");
+            if (barrels > 0) details.append("Barrels: ").append(barrels).append("  ");
+            if (shulkers > 0) details.append("Shulkers: ").append(shulkers).append("  ");
+            if (hoppers > 0) details.append("Hoppers: ").append(hoppers).append("  ");
+            if (carts > 0) details.append("Minecarts: ").append(carts);
+            this.popupSub = details.toString().trim();
+            this.popupEndTime = System.currentTimeMillis() + 8000L; // 8 Sekunden Einblendung
+        }
+
+        public void renderBottomPopup(GuiGraphics context, Minecraft mc, int sw, int sh) {
+            long now = System.currentTimeMillis();
+            if (now >= popupEndTime || popupTitle.isEmpty()) return;
+
+            int titleW = mc.font.width(popupTitle);
+            int subW = mc.font.width(popupSub);
+            int boxW = Math.max(titleW, subW) + 20;
+            int boxH = popupSub.isEmpty() ? 20 : 32;
+
+            int bx = (sw - boxW) / 2;
+            int by = sh - 68 - boxH; // Direkt über der Hotbar / Actionbar unten am Bildschirm
+
+            // Dunkler Hintergrund + Violett/Goldener Rahmen
+            context.fill(bx - 1, by - 1, bx + boxW + 1, by + boxH + 1, 0xFFFFD700);
+            context.fill(bx, by, bx + boxW, by + boxH, 0xEE12121A);
+
+            context.drawString(mc.font, popupTitle, bx + (boxW - titleW) / 2, by + 5, 0xFFFFD700, true);
+            if (!popupSub.isEmpty()) {
+                context.drawString(mc.font, popupSub, bx + (boxW - subW) / 2, by + 18, 0xFFE0E0E0, true);
+            }
+        }
+    }
+
+    // ==========================================
+    // PERSISTENT CACHE, ENTITY & STASH SCANNER
     // ==========================================
     public static class BlockScanner {
         private static Method minYMethod = null;
@@ -410,6 +481,27 @@ public class ExampleModClient implements ClientModInitializer {
             }
         }
 
+        // Scannt alle Chest-Minecarts und Hopper-Minecarts
+        public static void scanMinecarts(Minecraft mc, MinecartESP mod) {
+            mod.targets.clear();
+            if (mc.level == null || mc.player == null) return;
+
+            AABB searchBox = mc.player.getBoundingBox().inflate(256.0);
+            List<AbstractMinecartContainer> carts = mc.level.getEntitiesOfClass(AbstractMinecartContainer.class, searchBox);
+            for (AbstractMinecartContainer cart : carts) {
+                BlockPos bp = cart.blockPosition();
+                float ox = (float) (cart.getX() - bp.getX());
+                float oy = (float) (cart.getY() - bp.getY());
+                float oz = (float) (cart.getZ() - bp.getZ());
+
+                mod.targets.add(new RenderTarget(
+                    bp,
+                    ox - 0.45f, oy, oz - 0.45f,
+                    ox + 0.45f, oy + 0.7f, oz + 0.45f
+                ));
+            }
+        }
+
         public static void scanAllEnabled(Minecraft mc, List<Module> modules) {
             if (mc.level == null || mc.player == null) return;
 
@@ -423,8 +515,9 @@ public class ExampleModClient implements ClientModInitializer {
             SpawnerESP spawnerMod = null;
             RespawnAnchorESP anchorMod = null;
             AmethystGeodeESP geodeMod = null;
+            boolean wantStash = STASH_FINDER.isEnabled();
 
-            boolean anyEnabled = false;
+            boolean anyEnabled = wantStash;
             BlockPos playerPos = mc.player.blockPosition();
 
             for (Module m : modules) {
@@ -440,7 +533,7 @@ public class ExampleModClient implements ClientModInitializer {
                 else if (m instanceof RespawnAnchorESP ra) { anchorMod = ra; anyEnabled = true; }
                 else if (m instanceof AmethystGeodeESP g) { geodeMod = g; anyEnabled = true; }
 
-                if (!(m instanceof AmethystGeodeESP) && !(m instanceof ArmorStandESP)) {
+                if (!(m instanceof AmethystGeodeESP) && !(m instanceof ArmorStandESP) && !(m instanceof MinecartESP)) {
                     Iterator<Map.Entry<BlockPos, RenderTarget>> it = m.cache.entrySet().iterator();
                     while (it.hasNext()) {
                         BlockPos pos = it.next().getKey();
@@ -455,6 +548,16 @@ public class ExampleModClient implements ClientModInitializer {
 
             if (!anyEnabled) return;
 
+            // Optional: Zähle Container-Minecarts pro Chunk für den Stash Finder
+            Map<Long, Integer> cartsPerChunk = new HashMap<>();
+            if (wantStash) {
+                AABB searchBox = mc.player.getBoundingBox().inflate(256.0);
+                for (AbstractMinecartContainer cart : mc.level.getEntitiesOfClass(AbstractMinecartContainer.class, searchBox)) {
+                    long cKey = cart.chunkPosition().toLong();
+                    cartsPerChunk.put(cKey, cartsPerChunk.getOrDefault(cKey, 0) + 1);
+                }
+            }
+
             int renderDistance = mc.options.getEffectiveRenderDistance();
             ChunkPos playerChunk = mc.player.chunkPosition();
 
@@ -465,24 +568,44 @@ public class ExampleModClient implements ClientModInitializer {
                     LevelChunk chunk = mc.level.getChunkSource().getChunk(playerChunk.x + cx, playerChunk.z + cz, false);
                     if (chunk == null) continue;
 
+                    int cChests = 0, cBarrels = 0, cShulkers = 0, cHoppers = 0;
+
                     for (BlockEntity be : chunk.getBlockEntities().values()) {
                         BlockPos p = be.getBlockPos();
-                        if (chestMod != null && be instanceof ChestBlockEntity) {
-                            chestMod.cacheTarget(new RenderTarget(p, 0.0625f, 0.0f, 0.0625f, 0.9375f, 0.875f, 0.9375f));
-                        } else if (barrelMod != null && be instanceof BarrelBlockEntity) {
-                            barrelMod.cacheTarget(new RenderTarget(p));
-                        } else if (enderMod != null && be instanceof EnderChestBlockEntity) {
-                            enderMod.cacheTarget(new RenderTarget(p, 0.0625f, 0.0f, 0.0625f, 0.9375f, 0.875f, 0.9375f));
-                        } else if (hopperMod != null && be instanceof HopperBlockEntity) {
-                            hopperMod.cacheTarget(new RenderTarget(p));
-                        } else if (shulkerMod != null && be instanceof ShulkerBoxBlockEntity) {
-                            shulkerMod.cacheTarget(new RenderTarget(p));
+                        if (be instanceof ChestBlockEntity) {
+                            cChests++;
+                            if (chestMod != null) chestMod.cacheTarget(new RenderTarget(p, 0.0625f, 0.0f, 0.0625f, 0.9375f, 0.875f, 0.9375f));
+                        } else if (be instanceof BarrelBlockEntity) {
+                            cBarrels++;
+                            if (barrelMod != null) barrelMod.cacheTarget(new RenderTarget(p));
+                        } else if (be instanceof EnderChestBlockEntity) {
+                            cChests++;
+                            if (enderMod != null) enderMod.cacheTarget(new RenderTarget(p, 0.0625f, 0.0f, 0.0625f, 0.9375f, 0.875f, 0.9375f));
+                        } else if (be instanceof HopperBlockEntity) {
+                            cHoppers++;
+                            if (hopperMod != null) hopperMod.cacheTarget(new RenderTarget(p));
+                        } else if (be instanceof ShulkerBoxBlockEntity) {
+                            cShulkers++;
+                            if (shulkerMod != null) shulkerMod.cacheTarget(new RenderTarget(p));
                         } else if (dropperMod != null && (be instanceof DropperBlockEntity || be instanceof DispenserBlockEntity)) {
                             dropperMod.cacheTarget(new RenderTarget(p));
                         } else if (spawnerMod != null && be instanceof SpawnerBlockEntity) {
                             spawnerMod.cacheTarget(new RenderTarget(p));
                         } else if (pistonMod != null && be instanceof PistonMovingBlockEntity) {
                             pistonMod.cacheTarget(new RenderTarget(p));
+                        }
+                    }
+
+                    // Stash Finder Auswertung für diesen Chunk
+                    if (wantStash) {
+                        long chunkKey = chunk.getPos().toLong();
+                        int cCarts = cartsPerChunk.getOrDefault(chunkKey, 0);
+                        int total = cChests + cBarrels + cShulkers + cHoppers + cCarts;
+                        if (total >= STASH_FINDER.minBlocks.getValue().intValue() && !STASH_FINDER.alertedChunks.contains(chunkKey)) {
+                            STASH_FINDER.alertedChunks.add(chunkKey);
+                            int centerX = chunk.getPos().getMiddleBlockX();
+                            int centerZ = chunk.getPos().getMiddleBlockZ();
+                            STASH_FINDER.triggerAlert(centerX, centerZ, total, cChests, cBarrels, cShulkers, cHoppers, cCarts);
                         }
                     }
 
@@ -557,7 +680,7 @@ public class ExampleModClient implements ClientModInitializer {
             }
 
             for (Module m : modules) {
-                if (m.isEnabled() && !(m instanceof AmethystGeodeESP) && !(m instanceof ArmorStandESP)) {
+                if (m.isEnabled() && !(m instanceof AmethystGeodeESP) && !(m instanceof ArmorStandESP) && !(m instanceof MinecartESP)) {
                     m.targets.clear();
                     m.targets.addAll(m.cache.values());
                 }
@@ -943,7 +1066,6 @@ public class ExampleModClient implements ClientModInitializer {
             }
         }
 
-        // Rendert 3D-Boxen, Tracer-Linien, Hand-Items & Totem-Anzahl für alle Spieler
         public static void renderPvpEsp(GuiGraphics context, Minecraft mc, PvpESP mod, int sw, int sh, float partialTick) {
             if (mc.player == null || mc.level == null || mc.gameRenderer == null) return;
 
@@ -997,7 +1119,6 @@ public class ExampleModClient implements ClientModInitializer {
                 if (targetPlayer == mc.player) continue;
                 mod.targets.add(new RenderTarget(targetPlayer.blockPosition()));
 
-                // Interpolierte Spieler-Position für flüssige 144+ FPS Boxen
                 double px = targetPlayer.xo + (targetPlayer.getX() - targetPlayer.xo) * partialTick;
                 double py = targetPlayer.yo + (targetPlayer.getY() - targetPlayer.yo) * partialTick;
                 double pz = targetPlayer.zo + (targetPlayer.getZ() - targetPlayer.zo) * partialTick;
@@ -1061,12 +1182,10 @@ public class ExampleModClient implements ClientModInitializer {
                 int centerX = Math.round((sx[0] + sx[7]) * 0.5f);
                 int centerY = Math.round((sy[0] + sy[7]) * 0.5f);
 
-                // Tracer-Linie zum Spieler
                 if (mod.tracers.getValue()) {
                     drawCrispLine(context, sw / 2, sh / 2, centerX, centerY, outlineColor, sw, sh);
                 }
 
-                // HUD-Tag über dem Spieler: Name + Gehaltenes Item + Totem-Anzahl
                 int tagY = Math.max(12, Math.round(minScreenY) - 24);
                 int dist = (int) Math.round(mc.player.distanceTo(targetPlayer));
                 String nameLine = "§c" + targetPlayer.getName().getString() + " §7[" + dist + "m]";
@@ -1152,12 +1271,12 @@ public class ExampleModClient implements ClientModInitializer {
     }
 
     // ==========================================
-    // REDESIGNED CLICKGUI (Block ESP Tab + PvP Tab)
+    // CLICKGUI SCREEN
     // ==========================================
     public static class ClickGuiScreen extends Screen {
         private static boolean blockEspTabExpanded = true;
         private NumberSetting draggingSlider = null;
-        private final int col1X = 30, col2X = 250, panelY = 25, panelWidth = 200;
+        private final int col1X = 30, col2X = 250, panelY = 25, panelWidth = 205;
         private boolean leftWasDown = false;
         private boolean rightWasDown = false;
 
@@ -1197,9 +1316,7 @@ public class ExampleModClient implements ClientModInitializer {
                 EspRenderer.renderPvpEsp(context, mc, PVP_ESP, this.width, this.height, delta);
             }
 
-            // =====================================================
-            // LINKER HAUPTPUNKT: "BLOCK ESP" (Aufklappbares Hauptmenü)
-            // =====================================================
+            // LINKER HAUPTPUNKT: "BLOCK ESP" (Aufklappbares Dropdown)
             boolean headerHovered = isHovered(mouseX, mouseY, col1X, panelY, panelWidth, 22);
             context.fill(col1X, panelY - 2, col1X + panelWidth, panelY, 0xFF8A2BE2);
             context.fill(col1X, panelY, col1X + panelWidth, panelY + 22, headerHovered ? 0xF0221C35 : 0xF014141D);
@@ -1216,15 +1333,14 @@ public class ExampleModClient implements ClientModInitializer {
                 }
             }
 
-            // =====================================================
-            // RECHTER HAUPTPUNKT: "PVP & MOVEMENT" (PvP + Freecam)
-            // =====================================================
+            // RECHTER HAUPTPUNKT: "PVP & UTILITY" (PvP + Stash Finder + Freecam)
             context.fill(col2X, panelY - 2, col2X + panelWidth, panelY, 0xFFFF3737);
             context.fill(col2X, panelY, col2X + panelWidth, panelY + 22, 0xF014141D);
             context.drawString(this.font, "⚔ PVP & UTILITY", col2X + 8, panelY + 7, 0xFFFFFFFF, true);
 
             int rightY = panelY + 22;
             rightY = renderModuleRow(context, PVP_ESP, col2X, rightY, mouseX, mouseY, false);
+            rightY = renderModuleRow(context, STASH_FINDER, col2X, rightY, mouseX, mouseY, false);
             renderModuleRow(context, FREECAM, col2X, rightY, mouseX, mouseY, false);
         }
 
@@ -1233,7 +1349,6 @@ public class ExampleModClient implements ClientModInitializer {
             int bgColor = mod.isEnabled() ? 0xE6251B38 : (hovered ? 0xE61E1E2A : 0xE6161620);
             context.fill(x, currentY, x + panelWidth, currentY + 18, bgColor);
 
-            // Dezente Einrückungs-Linie für Unterpunkte von Block ESP
             if (isSubItem) {
                 context.fill(x, currentY, x + 2, currentY + 18, 0x668A2BE2);
             }
@@ -1248,7 +1363,8 @@ public class ExampleModClient implements ClientModInitializer {
 
             int textOffset = isSubItem ? 12 : 8;
             String prefix = isSubItem ? "• " : "";
-            String label = prefix + mod.getName() + (mod.isEnabled() && !(mod instanceof Freecam) ? " [" + mod.targets.size() + "]" : "");
+            boolean showCount = mod.isEnabled() && !(mod instanceof Freecam) && !(mod instanceof StashFinder);
+            String label = prefix + mod.getName() + (showCount ? " [" + mod.targets.size() + "]" : "");
             context.drawString(this.font, label, x + textOffset, currentY + 5, mod.isEnabled() ? 0xFFD8B4FE : 0xFFCCCCCC, true);
             context.drawString(this.font, mod.isExpanded() ? "▾" : "▸", x + panelWidth - 12, currentY + 5, 0xFF888888, true);
             currentY += 18;
@@ -1285,7 +1401,6 @@ public class ExampleModClient implements ClientModInitializer {
         }
 
         private void handleMouseClick(double mouseX, double mouseY, int button) {
-            // Klick auf den Hauptpunkt "BLOCK ESP" klappt alle Unterpunkte ein/aus
             if (isHovered(mouseX, mouseY, col1X, panelY, panelWidth, 22)) {
                 blockEspTabExpanded = !blockEspTabExpanded;
                 return;
@@ -1295,7 +1410,7 @@ public class ExampleModClient implements ClientModInitializer {
                 if (checkColumnClick(BLOCK_MODULES, col1X, panelY + 22, mouseX, mouseY, button)) return;
             }
 
-            checkColumnClick(List.of(PVP_ESP, FREECAM), col2X, panelY + 22, mouseX, mouseY, button);
+            checkColumnClick(List.of(PVP_ESP, STASH_FINDER, FREECAM), col2X, panelY + 22, mouseX, mouseY, button);
         }
 
         private boolean checkColumnClick(List<Module> colModules, int x, int startY, double mouseX, double mouseY, int button) {
