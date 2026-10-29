@@ -801,10 +801,6 @@ public class ExampleModClient implements ClientModInitializer {
             center = new BlockPos((int) (sumX / count), (int) (sumY / count), (int) (sumZ / count));
         }
     }
-
-    // ==========================================
-    // FIXED FREECAM MODULE [V] (No Shake / Jitter)
-    // ==========================================
     public static class Freecam extends Module {
         public final NumberSetting speed = new NumberSetting("Speed", 1.0, 0.1, 5.0, 0.1);
 
