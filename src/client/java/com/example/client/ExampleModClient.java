@@ -800,12 +800,12 @@ public class ExampleModClient implements ClientModInitializer {
             growthScore += weight;
             center = new BlockPos((int) (sumX / count), (int) (sumY / count), (int) (sumZ / count));
         }
-        
     }
-    
-    public static class Freecam extends Module {
-        public final NumberSetting speed = new NumberSetting("Speed", 1.0, 0.1, 5.0, 0.1);
 
+    // ==========================================
+    // FIXED FREECAM MODULE [V] (No Shake / Jitter)
+    // ==========================================
+    public static class Freecam extends Module {
         private double savedX, savedY, savedZ;
         private float savedYaw, savedPitch;
         private float camYaw, camPitch;
@@ -817,7 +817,6 @@ public class ExampleModClient implements ClientModInitializer {
 
         public Freecam() {
             super("Freecam [V]", 50, 200, 255, false);
-            settings.add(speed);
         }
 
         public ArmorStand getCameraDummy() {
@@ -944,7 +943,7 @@ public class ExampleModClient implements ClientModInitializer {
                 strafe /= len;
             }
 
-            double spd = speed.getValue();
+            double spd = 1.0;
             float yawRad = (float) Math.toRadians(camYaw);
 
             camX += (-Math.sin(yawRad) * forward - Math.cos(yawRad) * strafe) * spd;
