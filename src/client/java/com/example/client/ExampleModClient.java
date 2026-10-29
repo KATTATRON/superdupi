@@ -13,7 +13,6 @@ import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
-import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EquipmentSlot;
@@ -827,6 +826,13 @@ public class ExampleModClient implements ClientModInitializer {
             return cameraDummy;
         }
 
+        private static float wrapDeg(float deg) {
+            float d = deg % 360.0f;
+            if (d >= 180.0f) d -= 360.0f;
+            if (d < -180.0f) d += 360.0f;
+            return d;
+        }
+
         @Override
         public void toggle() {
             super.toggle();
@@ -841,7 +847,7 @@ public class ExampleModClient implements ClientModInitializer {
                 savedX = mc.player.getX();
                 savedY = mc.player.getY();
                 savedZ = mc.player.getZ();
-                savedYaw = Mth.wrapDegrees(mc.player.getYRot());
+                savedYaw = wrapDeg(mc.player.getYRot());
                 savedPitch = mc.player.getXRot();
 
                 mc.player.setYRot(savedYaw);
@@ -889,9 +895,6 @@ public class ExampleModClient implements ClientModInitializer {
             mc.player.xo = savedX;
             mc.player.yo = savedY;
             mc.player.zo = savedZ;
-            mc.player.xOld = savedX;
-            mc.player.yOld = savedY;
-            mc.player.zOld = savedZ;
             mc.player.setDeltaMovement(0, 0, 0);
             mc.player.setSprinting(false);
         }
@@ -904,7 +907,7 @@ public class ExampleModClient implements ClientModInitializer {
 
             mc.smartCull = false;
 
-            if (cameraDummy == null || cameraDummy.level() != mc.level) {
+            if (cameraDummy == null) {
                 cameraDummy = new ArmorStand(mc.level, camX, camY, camZ);
                 cameraDummy.setInvisible(true);
                 cameraDummy.setNoGravity(true);
@@ -967,8 +970,8 @@ public class ExampleModClient implements ClientModInitializer {
             float deltaPitch = currentPitch - savedPitch;
 
             if (Math.abs(deltaYaw) > 0.0001f || Math.abs(deltaPitch) > 0.0001f) {
-                camYaw = Mth.wrapDegrees(camYaw + deltaYaw);
-                camPitch = Mth.clamp(camPitch + deltaPitch, -90.0f, 90.0f);
+                camYaw = wrapDeg(camYaw + deltaYaw);
+                camPitch = Math.max(-90.0f, Math.min(90.0f, camPitch + deltaPitch));
             }
 
             mc.player.setYRot(savedYaw);
@@ -988,9 +991,6 @@ public class ExampleModClient implements ClientModInitializer {
             cameraDummy.xo = prevCamX;
             cameraDummy.yo = prevCamY;
             cameraDummy.zo = prevCamZ;
-            cameraDummy.xOld = prevCamX;
-            cameraDummy.yOld = prevCamY;
-            cameraDummy.zOld = prevCamZ;
 
             cameraDummy.setYRot(camYaw);
             cameraDummy.yRotO = camYaw;
