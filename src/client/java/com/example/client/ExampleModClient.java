@@ -13,6 +13,7 @@ import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
+import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EquipmentSlot;
@@ -433,7 +434,7 @@ public class ExampleModClient implements ClientModInitializer {
 
         public void updateStashBoxes(Player player) {
             targets.clear();
-            Iterator<Map.Entry<Long, BlockPos>> it = stashBoxes.entrySet().iterator();
+            Iterator> it = stashBoxes.entrySet().iterator();
             while (it.hasNext()) {
                 Map.Entry<Long, BlockPos> entry = it.next();
                 BlockPos pos = entry.getValue();
@@ -586,7 +587,7 @@ public class ExampleModClient implements ClientModInitializer {
                 else if (m instanceof AmethystGeodeESP g) { geodeMod = g; anyEnabled = true; }
 
                 if (!(m instanceof AmethystGeodeESP) && !(m instanceof ArmorStandESP) && !(m instanceof MinecartESP) && !(m instanceof StashFinder)) {
-                    Iterator<Map.Entry<BlockPos, RenderTarget>> it = m.cache.entrySet().iterator();
+                    Iterator> it = m.cache.entrySet().iterator();
                     while (it.hasNext()) {
                         BlockPos pos = it.next().getKey();
                         if (!pos.closerThan(playerPos, 500.0)) {
@@ -802,12 +803,16 @@ public class ExampleModClient implements ClientModInitializer {
         }
     }
 
+    // ==========================================
+    // FIXED FREECAM MODULE [V] (No Shake / Jitter)
+    // ==========================================
     public static class Freecam extends Module {
         public final NumberSetting speed = new NumberSetting("Speed", 1.0, 0.1, 5.0, 0.1);
 
         private double savedX, savedY, savedZ;
         private float savedYaw, savedPitch;
         private float camYaw, camPitch;
+        private double prevCamX, prevCamY, prevCamZ;
         private ArmorStand cameraDummy = null;
 
         public static double camX, camY, camZ;
@@ -836,12 +841,15 @@ public class ExampleModClient implements ClientModInitializer {
                 savedX = mc.player.getX();
                 savedY = mc.player.getY();
                 savedZ = mc.player.getZ();
-                savedYaw = mc.player.getYRot();
+                savedYaw = Mth.wrapDegrees(mc.player.getYRot());
                 savedPitch = mc.player.getXRot();
 
-                camX = savedX;
-                camY = savedY;
-                camZ = savedZ;
+                mc.player.setYRot(savedYaw);
+                mc.player.yRotO = savedYaw;
+
+                camX = prevCamX = savedX;
+                camY = prevCamY = savedY;
+                camZ = prevCamZ = savedZ;
                 camYaw = savedYaw;
                 camPitch = savedPitch;
 
@@ -852,7 +860,7 @@ public class ExampleModClient implements ClientModInitializer {
                 cameraDummy.setInvisible(true);
                 cameraDummy.setNoGravity(true);
                 cameraDummy.noPhysics = true;
-                applyDummyRotation();
+                applyDummyState();
 
                 mc.setCameraEntity(cameraDummy);
             } else {
@@ -860,9 +868,14 @@ public class ExampleModClient implements ClientModInitializer {
                 mc.setCameraEntity(mc.player);
                 cameraDummy = null;
                 mc.player.setPos(savedX, savedY, savedZ);
+                mc.player.xo = savedX;
+                mc.player.yo = savedY;
+                mc.player.zo = savedZ;
                 mc.player.setDeltaMovement(0, 0, 0);
                 mc.player.setYRot(savedYaw);
+                mc.player.yRotO = savedYaw;
                 mc.player.setXRot(savedPitch);
+                mc.player.xRotO = savedPitch;
             }
         }
 
@@ -870,24 +883,15 @@ public class ExampleModClient implements ClientModInitializer {
             if (mc.player == null) return;
             mc.smartCull = false;
 
-            float deltaYaw = mc.player.getYRot() - savedYaw;
-            float deltaPitch = mc.player.getXRot() - savedPitch;
-            if (deltaYaw != 0 || deltaPitch != 0) {
-                camYaw += deltaYaw;
-                camPitch = Math.max(-90.0f, Math.min(90.0f, camPitch + deltaPitch));
-            }
-
-            mc.player.setYRot(savedYaw);
-            mc.player.yRotO = savedYaw;
-            mc.player.setYHeadRot(savedYaw);
-            mc.player.yHeadRotO = savedYaw;
-            mc.player.setXRot(savedPitch);
-            mc.player.xRotO = savedPitch;
+            captureMouseDelta(mc);
 
             mc.player.setPos(savedX, savedY, savedZ);
             mc.player.xo = savedX;
             mc.player.yo = savedY;
             mc.player.zo = savedZ;
+            mc.player.xOld = savedX;
+            mc.player.yOld = savedY;
+            mc.player.zOld = savedZ;
             mc.player.setDeltaMovement(0, 0, 0);
             mc.player.setSprinting(false);
         }
@@ -900,7 +904,7 @@ public class ExampleModClient implements ClientModInitializer {
 
             mc.smartCull = false;
 
-            if (cameraDummy == null) {
+            if (cameraDummy == null || cameraDummy.level() != mc.level) {
                 cameraDummy = new ArmorStand(mc.level, camX, camY, camZ);
                 cameraDummy.setInvisible(true);
                 cameraDummy.setNoGravity(true);
@@ -911,8 +915,17 @@ public class ExampleModClient implements ClientModInitializer {
                 mc.setCameraEntity(cameraDummy);
             }
 
+            captureMouseDelta(mc);
+
             mc.player.setPos(savedX, savedY, savedZ);
+            mc.player.xo = savedX;
+            mc.player.yo = savedY;
+            mc.player.zo = savedZ;
             mc.player.setDeltaMovement(0, 0, 0);
+
+            prevCamX = camX;
+            prevCamY = camY;
+            prevCamZ = camZ;
 
             double forward = 0, strafe = 0, vertical = 0;
             if (mc.screen == null) {
@@ -924,44 +937,61 @@ public class ExampleModClient implements ClientModInitializer {
                 if (GLFW.glfwGetKey(window, GLFW.GLFW_KEY_LEFT_SHIFT) == GLFW.GLFW_PRESS) vertical -= 1;
             }
 
+            double len = Math.hypot(forward, strafe);
+            if (len > 1.0) {
+                forward /= len;
+                strafe /= len;
+            }
+
             double spd = speed.getValue();
             float yawRad = (float) Math.toRadians(camYaw);
 
-            double dx = (-Math.sin(yawRad) * forward - Math.cos(yawRad) * strafe) * spd;
-            double dz = (Math.cos(yawRad) * forward - Math.sin(yawRad) * strafe) * spd;
-            double dy = vertical * spd;
+            camX += (-Math.sin(yawRad) * forward - Math.cos(yawRad) * strafe) * spd;
+            camZ += (Math.cos(yawRad) * forward - Math.sin(yawRad) * strafe) * spd;
+            camY += vertical * spd;
 
-            cameraDummy.xo = camX;
-            cameraDummy.yo = camY;
-            cameraDummy.zo = camZ;
-
-            camX += dx;
-            camY += dy;
-            camZ += dz;
-
-            cameraDummy.setPos(camX, camY, camZ);
-            applyDummyRotation();
+            applyDummyState();
         }
 
         public void syncRotationFrame(Minecraft mc) {
             if (cameraDummy == null || mc.player == null) return;
-
-            float deltaYaw = mc.player.getYRot() - savedYaw;
-            float deltaPitch = mc.player.getXRot() - savedPitch;
-            if (deltaYaw != 0 || deltaPitch != 0) {
-                camYaw += deltaYaw;
-                camPitch = Math.max(-90.0f, Math.min(90.0f, camPitch + deltaPitch));
-                mc.player.setYRot(savedYaw);
-                mc.player.yRotO = savedYaw;
-                mc.player.setXRot(savedPitch);
-                mc.player.xRotO = savedPitch;
-            }
-
-            applyDummyRotation();
+            captureMouseDelta(mc);
+            applyDummyState();
         }
 
-        private void applyDummyRotation() {
+        private void captureMouseDelta(Minecraft mc) {
+            float currentYaw = mc.player.getYRot();
+            float currentPitch = mc.player.getXRot();
+
+            float deltaYaw = currentYaw - savedYaw;
+            float deltaPitch = currentPitch - savedPitch;
+
+            if (Math.abs(deltaYaw) > 0.0001f || Math.abs(deltaPitch) > 0.0001f) {
+                camYaw = Mth.wrapDegrees(camYaw + deltaYaw);
+                camPitch = Mth.clamp(camPitch + deltaPitch, -90.0f, 90.0f);
+            }
+
+            mc.player.setYRot(savedYaw);
+            mc.player.yRotO = savedYaw;
+            mc.player.setYHeadRot(savedYaw);
+            mc.player.yHeadRotO = savedYaw;
+            mc.player.setYBodyRot(savedYaw);
+            mc.player.yBodyRotO = savedYaw;
+            mc.player.setXRot(savedPitch);
+            mc.player.xRotO = savedPitch;
+        }
+
+        private void applyDummyState() {
             if (cameraDummy == null) return;
+
+            cameraDummy.setPos(camX, camY, camZ);
+            cameraDummy.xo = prevCamX;
+            cameraDummy.yo = prevCamY;
+            cameraDummy.zo = prevCamZ;
+            cameraDummy.xOld = prevCamX;
+            cameraDummy.yOld = prevCamY;
+            cameraDummy.zOld = prevCamZ;
+
             cameraDummy.setYRot(camYaw);
             cameraDummy.yRotO = camYaw;
             cameraDummy.setYHeadRot(camYaw);
