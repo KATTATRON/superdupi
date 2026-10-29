@@ -800,7 +800,9 @@ public class ExampleModClient implements ClientModInitializer {
             growthScore += weight;
             center = new BlockPos((int) (sumX / count), (int) (sumY / count), (int) (sumZ / count));
         }
+        
     }
+    
     public static class Freecam extends Module {
         public final NumberSetting speed = new NumberSetting("Speed", 1.0, 0.1, 5.0, 0.1);
 
